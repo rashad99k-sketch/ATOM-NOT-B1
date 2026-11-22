@@ -139,26 +139,27 @@ def test_shared_scanner_cache_reuses_raw_snapshot_and_returns_closed_bars_only(m
 
 
 
-def test_m15_radar_batches_are_bounded_and_rotate_universe_and_retained_setups(monkeypatch):
+def test_standalone_30_second_radar_is_disabled_without_exchange_fetch(monkeypatch):
+    import inspect
     import ggpbot
 
-    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_active_cursor", 0)
-    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_universe_cursor", 0)
-    universe = [f"COIN{i}/USDT" for i in range(80)]
-    retained = [f"ACTIVE{i}/USDT" for i in range(20)]
+    calls = []
+    monkeypatch.setattr(ggpbot, "get_ohlcv_safe", lambda *args, **kwargs: calls.append(args))
+    assert ggpbot.run_m15_crossover_radar() is False
+    assert calls == []
+    assert not hasattr(ggpbot, "M15_RADAR_SCAN_INTERVAL_SECONDS")
+    assert not hasattr(ggpbot, "M15_RADAR_BATCH_SIZE")
+    main_loop_source = inspect.getsource(ggpbot._original_main_loop_sniper)
+    assert "run_m15_crossover_radar" not in main_loop_source
 
-    first = ggpbot._select_m15_radar_batch(universe, retained, batch_size=10)
-    second = ggpbot._select_m15_radar_batch(universe, retained, batch_size=10)
 
-    assert len(first) == 10
-    assert len(second) == 10
-    assert len(set(first)) == 10
-    assert len(set(second)) == 10
-    assert len(set(first) & set(retained)) == 5
-    assert len(set(second) & set(retained)) == 5
-    assert set(first) != set(second)
-    assert ggpbot.M15_RADAR_SCAN_INTERVAL_SECONDS == 30
-    assert ggpbot.M15_RADAR_BATCH_SIZE == 10
+def test_legacy_two_stage_scanner_cadence_is_preserved():
+    import ggpbot
+
+    assert ggpbot.GLOBAL_SCAN_INTERVAL == 1200
+    assert ggpbot.INSTITUTIONAL_WATCHLIST_REFRESH_SECONDS == 20
+    assert ggpbot.INSTITUTIONAL_WATCHLIST_BATCH_SIZE == 12
+    assert ggpbot.INSTITUTIONAL_WATCHLIST_MAX_SYMBOLS == 120
 
 
 def test_same_symbol_scanner_cache_miss_is_single_flight(monkeypatch):
@@ -227,14 +228,3 @@ def test_bingx_418_kline_response_enters_longer_cooldown(monkeypatch):
 
 
 
-def test_m15_radar_market_universe_is_cached_across_30_second_cycles(monkeypatch):
-    import ggpbot
-
-    calls = []
-    monkeypatch.setattr(ggpbot, "get_usdt_perp_symbols", lambda: calls.append(1) or ["BTC/USDT"])
-    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_universe_cache", {})
-    first = ggpbot._get_m15_radar_universe()
-    second = ggpbot._get_m15_radar_universe()
-
-    assert first == second == ["BTC/USDT"]
-    assert len(calls) == 1
