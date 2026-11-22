@@ -209,11 +209,14 @@ def test_rate_limit_cooldown_survives_process_restart(tmp_path):
     with pytest.raises(RuntimeError, match="429"):
         GovernedExchange(raw, first_process_governor).fetch_positions(["BTC/USDT"])
 
+    # A real process restart creates a fresh CCXT client and a fresh request method.
+    restarted_raw = FakeExchange()
+    restarted_raw.request = limited
     restarted_governor = make_governor(
         cooldown_429=5, state_path=state_path
     )
     with pytest.raises(APIGovernorError) as caught:
-        GovernedExchange(raw, restarted_governor).fetch_positions(["ETH/USDT"])
+        GovernedExchange(restarted_raw, restarted_governor).fetch_positions(["ETH/USDT"])
     assert caught.value.code == 429
     assert len(calls) == 1
 
