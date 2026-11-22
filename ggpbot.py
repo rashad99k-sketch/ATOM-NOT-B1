@@ -11978,7 +11978,7 @@ def run_global_discovery_scanner():
         top_n=min(40, SCANNER_UNIVERSE_MAX),
         min_score=4.5,
         max_symbols=SCANNER_UNIVERSE_MAX,
-        should_stop=lambda: bool(STATE.get("open") or TRADE_STATE.get("in_position")),
+        should_stop=_discovery_paused,
     )
     MEMORY["professional_scan_candidates"] = [
         {**row, "score": round(float(row.get("score", 0) or 0) * 10.0, 2),
@@ -11994,7 +11994,7 @@ def run_global_discovery_scanner():
         "duration_seconds": round(time.time() - pro_started, 2),
         "role": "DISCOVERY_ONLY_BOTH_SIDES_REANALYZED",
     }
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time(),
                      "professional_candidates": len(pro_candidates)})
         return
@@ -12023,7 +12023,7 @@ def run_global_discovery_scanner():
         if symbol and symbol not in top_symbols:
             top_symbols.append(symbol)
     for symbol in top_symbols[:30]:
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         frame = _get_scanner_frame(symbol, 150)
         if frame is None or not validate_dataframe(frame, 80):
@@ -12059,6 +12059,11 @@ def run_global_discovery_scanner():
             continue
         row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
         prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
+        if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
+            terminal_key = roro_canonical_symbol(symbol)
+            terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
+            if isinstance(terminal_item, dict):
+                terminal_item.pop("m15_setup", None)
         if row.get("lifecycle_active"):
             # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
             canonical_key = roro_canonical_symbol(symbol)
@@ -12390,12 +12395,30 @@ def _fetch_external_close_diagnostic(symbol, side, entry_time=None, stop_order_i
                                    bot_close_order_ids=bot_close_order_ids or [])
 
 
+def _reset_m15_discovery_after_verified_flat():
+    """Clear only runtime M15 discovery state after BingX FLAT is authoritative."""
+    try:
+        clear_m15_setup_memory()
+        MEMORY["m15_setup_watchlist"] = []
+        for item in MEMORY.setdefault("watchlist", {}).values():
+            if isinstance(item, dict):
+                item.pop("m15_setup", None)
+        log_execution("[DISCOVERY_LIFECYCLE] verified FLAT; runtime M15 candidates cleared for fresh universe scan", "INFO")
+        return True
+    except Exception as exc:
+        log_execution(f"[DISCOVERY_LIFECYCLE] runtime reset failed: {type(exc).__name__}: {exc}", "WARN")
+        return False
+
+
 def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     """Clear exposure only after BingX FLAT; classify close cause from exchange evidence."""
     global RECOVERY_BLOCK_ENTRIES, _ACTIVE_TRADE
     if not STATE.get("open"):
         MEMORY["position_status"] = "FLAT"
         MEMORY["current_position"] = None
+        MEMORY["recovery_status"] = "RECONCILED_FLAT"
+        RECOVERY_BLOCK_ENTRIES = False
+        _reset_m15_discovery_after_verified_flat()
         return True
     trade_id = STATE.get("trade_id")
     side = STATE.get("side")
@@ -12493,15 +12516,7 @@ def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     MEMORY["recovery_status"] = "RECONCILED_FLAT"
     RECOVERY_BLOCK_ENTRIES = False
     # A new discovery cycle starts only after this exchange-confirmed FLAT.
-    try:
-        clear_m15_setup_memory()
-        MEMORY["m15_setup_watchlist"] = []
-        for _watch_item in MEMORY.setdefault("watchlist", {}).values():
-            if isinstance(_watch_item, dict):
-                _watch_item.pop("m15_setup", None)
-        log_execution("[DISCOVERY_LIFECYCLE] verified FLAT; runtime M15 candidates cleared for fresh universe scan", "INFO")
-    except Exception as _reset_exc:
-        log_execution(f"[DISCOVERY_LIFECYCLE] runtime reset failed: {type(_reset_exc).__name__}", "WARN")
+    _reset_m15_discovery_after_verified_flat()
     clear_position_dashboard()
     STATE["last_close_verified"] = True
     STATE["last_close_exchange_flat_confirmed"] = True
