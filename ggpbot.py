@@ -12157,108 +12157,109 @@ def run_m15_crossover_radar(symbols=None):
         return False
     new_cross_count = 0
     # M15 crossover radar is observational and shares the existing scanner cache.
-        # It never calls execute_entry and never replaces the institutional Entry Gate.
-        crossover_rows = []
-        crossover_scan_time_ms = int(time.time() * 1000)
-        state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
-        for symbol in symbols:
-            if _discovery_paused():
-                break
-            raw_frame = _get_scanner_raw_frame(symbol, 150)
-            try:
-                row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
-            except Exception as exc:
-                log_execution(
-                    f"[M15_CROSSOVER] symbol={symbol} status=UNAVAILABLE reason={type(exc).__name__}",
-                    "WARN", debounce_key=f"m15_radar_error:{symbol}", debounce_sec=300
-                )
-                continue
-            if row.get("crossover_status") == "DATA_UNAVAILABLE":
-                continue
-            row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
-            prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
-            prior_setup = prior.get("m15_setup") if isinstance(prior, dict) else {}
-            if (row.get("crossover_status") == "CROSS_CONFIRMED"
-                    and row.get("lifecycle_event_id")
-                    and (not isinstance(prior_setup, dict)
-                         or prior_setup.get("event_id") != row.get("lifecycle_event_id"))):
-                new_cross_count += 1
-            if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
-                terminal_key = roro_canonical_symbol(symbol)
-                terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
-                if isinstance(terminal_item, dict):
-                    terminal_item.pop("m15_setup", None)
-            if row.get("lifecycle_active"):
-                # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
-                canonical_key = roro_canonical_symbol(symbol)
-                watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
-                watch_item["m15_setup"] = {
-                    "stage": row.get("lifecycle_stage"),
-                    "direction": row.get("lifecycle_direction"),
-                    "strategy_mode": row.get("strategy_mode"),
-                    "reason": row.get("strategy_mode_reason"),
-                    "event_id": row.get("lifecycle_event_id"),
-                    "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
-                    "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
-                    "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
-                    "cycles_seen": row.get("lifecycle_cycles_seen", 1),
-                    "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
-                    "updated_at_ms": crossover_scan_time_ms,
-                    "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
-                }
-                watch_item["last_update"] = crossover_scan_time_ms / 1000.0
-                if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
-                    watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
-                    watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
-            if isinstance(prior, dict):
-                prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
-                    prior.get("last_update", prior.get("last_updated", 0)), 0.0
-                )
-                if prior_age <= 1800:
-                    prior_liquidity = prior.get("liquidity") if isinstance(prior.get("liquidity"), dict) else {}
-                    prior_regime = prior.get("market_regime")
-                    if isinstance(prior_regime, dict):
-                        prior_regime = prior_regime.get("state")
-                    row["institutional_setup_state"] = prior.get("decision_state")
-                    row["institutional_rejection_reason"] = prior.get("decision_reason")
-                    row["liquidity_status"] = prior_liquidity.get("status") or row["liquidity_status"]
-                    row["market_regime"] = prior_regime or prior.get("regime") or row["market_regime"]
-                    row["order_block"] = prior.get("order_block")
-                    row["fvg"] = prior.get("fvg")
-                    row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
-            if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
-                    or row.get("lifecycle_active")
-                    or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
-                crossover_rows.append(row)
-        # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
-        # This is an in-memory candidate feed, not a second scanner or entry authority.
-        MEMORY["m15_setup_watchlist"] = [
-            {
-                "symbol": row.get("symbol"),
-                "side_hint": row.get("lifecycle_direction"),
-                "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
-                "m15_stage": row.get("lifecycle_stage"),
-                "m15_event_id": row.get("lifecycle_event_id"),
-                "m15_cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
-                "source": "m15_runtime_watchlist",
+    # It never calls execute_entry and never replaces the institutional Entry Gate.
+    crossover_rows = []
+    crossover_scan_time_ms = int(time.time() * 1000)
+    state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
+    for symbol in symbols:
+        if _discovery_paused():
+            break
+        raw_frame = _get_scanner_raw_frame(symbol, 150)
+        try:
+            row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
+        except Exception as exc:
+            log_execution(
+                f"[M15_CROSSOVER] symbol={symbol} status=UNAVAILABLE reason={type(exc).__name__}",
+                "WARN", debounce_key=f"m15_radar_error:{symbol}", debounce_sec=300
+            )
+            continue
+        if row.get("crossover_status") == "DATA_UNAVAILABLE":
+            continue
+        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
+        prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
+        prior_setup = prior.get("m15_setup") if isinstance(prior, dict) else {}
+        if (row.get("crossover_status") == "CROSS_CONFIRMED"
+                and row.get("lifecycle_event_id")
+                and (not isinstance(prior_setup, dict)
+                     or prior_setup.get("event_id") != row.get("lifecycle_event_id"))):
+            new_cross_count += 1
+        if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
+            terminal_key = roro_canonical_symbol(symbol)
+            terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
+            if isinstance(terminal_item, dict):
+                terminal_item.pop("m15_setup", None)
+        if row.get("lifecycle_active"):
+            # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
+            canonical_key = roro_canonical_symbol(symbol)
+            watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
+            watch_item["m15_setup"] = {
+                "stage": row.get("lifecycle_stage"),
+                "direction": row.get("lifecycle_direction"),
+                "strategy_mode": row.get("strategy_mode"),
+                "reason": row.get("strategy_mode_reason"),
+                "event_id": row.get("lifecycle_event_id"),
+                "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+                "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
+                "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
+                "cycles_seen": row.get("lifecycle_cycles_seen", 1),
+                "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
+                "updated_at_ms": crossover_scan_time_ms,
+                "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
             }
-            for row in crossover_rows if row.get("lifecycle_active")
-            and row.get("lifecycle_direction") in {"BUY", "SELL"}
-        ]
-        crossover_rows.sort(key=lambda item: (
-            state_rank.get(str(item.get("crossover_status")), 3),
-            item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
-            item.get("symbol", ""),
-        ))
-        MEMORY["m15_crossover_radar"] = crossover_rows[:60]
-        log_execution(
-            f"[M15_CROSSOVER] observed={len(crossover_rows)} confirmed="
-            f"{sum(x.get('crossover_status') == 'CROSS_CONFIRMED' for x in crossover_rows)} "
-            f"intrabar={sum(x.get('crossover_status') == 'CROSS_DETECTED' for x in crossover_rows)} "
-            f"pre_cross={sum(x.get('crossover_status') == 'PRE_CROSS' for x in crossover_rows)} "
-            "authority=DISCOVERY_ONLY",
-            "INFO", debounce_key="m15_crossover_radar", debounce_sec=30
-        )
+            watch_item["last_update"] = crossover_scan_time_ms / 1000.0
+            if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
+                watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
+                watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
+        if isinstance(prior, dict):
+            prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
+                prior.get("last_update", prior.get("last_updated", 0)), 0.0
+            )
+            if prior_age <= 1800:
+                prior_liquidity = prior.get("liquidity") if isinstance(prior.get("liquidity"), dict) else {}
+                prior_regime = prior.get("market_regime")
+                if isinstance(prior_regime, dict):
+                    prior_regime = prior_regime.get("state")
+                row["institutional_setup_state"] = prior.get("decision_state")
+                row["institutional_rejection_reason"] = prior.get("decision_reason")
+                row["liquidity_status"] = prior_liquidity.get("status") or row["liquidity_status"]
+                row["market_regime"] = prior_regime or prior.get("regime") or row["market_regime"]
+                row["order_block"] = prior.get("order_block")
+                row["fvg"] = prior.get("fvg")
+                row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
+        if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
+                or row.get("lifecycle_active")
+                or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
+            crossover_rows.append(row)
+    # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
+    # This is an in-memory candidate feed, not a second scanner or entry authority.
+    MEMORY["m15_setup_watchlist"] = [
+        {
+            "symbol": row.get("symbol"),
+            "side_hint": row.get("lifecycle_direction"),
+            "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
+            "m15_stage": row.get("lifecycle_stage"),
+            "m15_event_id": row.get("lifecycle_event_id"),
+            "m15_cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+            "source": "m15_runtime_watchlist",
+        }
+        for row in crossover_rows if row.get("lifecycle_active")
+        and row.get("lifecycle_direction") in {"BUY", "SELL"}
+    ]
+    crossover_rows.sort(key=lambda item: (
+        state_rank.get(str(item.get("crossover_status")), 3),
+        item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
+        item.get("symbol", ""),
+    ))
+    MEMORY["m15_crossover_radar"] = crossover_rows[:60]
+    log_execution(
+        f"[M15_CROSSOVER] observed={len(crossover_rows)} confirmed="
+        f"{sum(x.get('crossover_status') == 'CROSS_CONFIRMED' for x in crossover_rows)} "
+        f"intrabar={sum(x.get('crossover_status') == 'CROSS_DETECTED' for x in crossover_rows)} "
+        f"pre_cross={sum(x.get('crossover_status') == 'PRE_CROSS' for x in crossover_rows)} "
+        "authority=DISCOVERY_ONLY",
+        "INFO", debounce_key="m15_crossover_radar", debounce_sec=30
+    )
+
     return True
 
 
