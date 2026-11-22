@@ -12167,24 +12167,51 @@ def run_global_discovery_scanner():
 
 
 M15_RADAR_SCAN_INTERVAL_SECONDS = _env_int_range("M15_RADAR_SCAN_INTERVAL_SECONDS", 30, 10, 120)
+M15_RADAR_BATCH_SIZE = _env_int_range("M15_RADAR_BATCH_SIZE", 10, 5, 20)
+
+
+def _select_m15_radar_batch(symbols, retained_symbols=None, batch_size=None):
+    """Bound M15 work per cycle; prioritize retained setups and rotate the universe."""
+    symbols = list(dict.fromkeys(str(x) for x in (symbols or []) if x))
+    retained = list(dict.fromkeys(str(x) for x in (retained_symbols or []) if x))
+    size = max(1, min(int(batch_size or M15_RADAR_BATCH_SIZE), 20))
+    active_take = min(len(retained), max(1, size // 2))
+    active_cursor = int(MEMORY.get("m15_radar_active_cursor", 0)) % max(1, len(retained))
+    active_batch = [retained[(active_cursor + i) % len(retained)]
+                    for i in range(active_take)] if retained else []
+    if retained:
+        MEMORY["m15_radar_active_cursor"] = (active_cursor + active_take) % len(retained)
+    active_set = set(retained)
+    universe = [symbol for symbol in symbols if symbol not in active_set]
+    remaining = max(0, size - len(active_batch))
+    cursor = int(MEMORY.get("m15_radar_universe_cursor", 0)) % max(1, len(universe))
+    universe_batch = [universe[(cursor + i) % len(universe)]
+                      for i in range(min(remaining, len(universe)))] if universe else []
+    if universe:
+        MEMORY["m15_radar_universe_cursor"] = (cursor + len(universe_batch)) % len(universe)
+    return list(dict.fromkeys(active_batch + universe_batch))
 
 
 def run_m15_crossover_radar(symbols=None):
-    """Frequent M15 opportunity discovery; feeds the existing institutional Watchlist only."""
+    """30-second bounded M15 opportunity scan; one small API-safe batch per cycle."""
     if _discovery_paused():
         return False
-    if symbols is None:
-        symbols = list(get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX])
-    else:
-        symbols = list(symbols)
+    universe = list(symbols) if symbols is not None else list(get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX])
     try:
         retained = [item.get("symbol") for item in list_active_m15_setups()
                     if isinstance(item, dict) and item.get("symbol")]
-        symbols = list(dict.fromkeys(symbols + retained[:80]))
     except Exception as retain_exc:
+        retained = []
         log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
+    symbols = _select_m15_radar_batch(universe, retained)
     if not symbols:
         return False
+    log_execution(
+        f"[M15_CROSSOVER] batch={len(symbols)} retained={min(len(retained), max(1, M15_RADAR_BATCH_SIZE // 2))} "
+        f"universe={len(universe)} cadence={M15_RADAR_SCAN_INTERVAL_SECONDS}s "
+        f"kline_min_interval={BINGX_KLINE_MIN_INTERVAL}s",
+        "INFO", debounce_key="m15_radar_batch", debounce_sec=30
+    )
     new_cross_count = 0
     # M15 crossover radar is observational and shares the existing scanner cache.
     # It never calls execute_entry and never replaces the institutional Entry Gate.
