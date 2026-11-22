@@ -102,8 +102,12 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
                     "stage": "WAITING_FOR_PULLBACK", "first_seen_ms": now_ms,
                     "last_seen_ms": now_ms, "pullback_timestamp_ms": None,
                     "retest_timestamp_ms": None, "rejection_confirmed": False,
+                    "cycles_seen": 1, "last_cycle_id": cycle_id,
                 }
             else:
+                if int(prior.get("last_cycle_id") or -1) != cycle_id:
+                    prior["cycles_seen"] = int(prior.get("cycles_seen", 0)) + 1
+                    prior["last_cycle_id"] = cycle_id
                 prior["last_seen_ms"] = now_ms
         elif status == "PRE_CROSS":
             if not active or prior.get("stage") in {"INVALIDATED", "EXPIRED"}:
@@ -211,6 +215,8 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
             "strategy_mode": mode,
             "strategy_mode_reason": mode_reason,
             "lifecycle_persisted": True,
+            "lifecycle_cycles_seen": int(prior.get("cycles_seen", 1)),
+            "lifecycle_minimum_retention_met": int(prior.get("cycles_seen", 1)) >= 2,
             "entry_authorization": False,
             "entry_readiness": "NOT_AUTHORIZED_BY_RADAR",
         })
