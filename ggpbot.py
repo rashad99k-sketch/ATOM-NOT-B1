@@ -891,7 +891,7 @@ INSUFFICIENT_MARGIN_COOLDOWN_UNTIL = None
 _raw_ex = ccxt.bingx({
     "apiKey": API_KEY,
     "secret": API_SECRET,
-    "enableRateLimit": True,
+    "enableRateLimit": False,  # BingXAPIGovernor is the single shared request scheduler.
     "timeout": _env_int_range("EXCHANGE_HTTP_TIMEOUT_MS", 12000, 5000, 60000),
     "options": {"defaultType": "swap"}
 })
