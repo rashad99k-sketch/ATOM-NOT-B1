@@ -320,6 +320,7 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         ("scanner_v2_buy", memory.get("scanner_v2_buy", []), "BUY"),
         ("scanner_v2_sell", memory.get("scanner_v2_sell", []), "SELL"),
         ("radar_watchlist", memory.get("radar_watchlist", []), None),
+        ("m15_setup_watchlist", memory.get("m15_setup_watchlist", []), None),
         ("radar_top5", memory.get("radar_top5", []), None),
         ("top_candidates", memory.get("top_candidates", []), None),
         ("candidates", memory.get("candidates", []), None),
