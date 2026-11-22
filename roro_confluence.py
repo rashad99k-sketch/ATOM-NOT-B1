@@ -374,9 +374,12 @@ def validate_ema915_vwap_pullback_entry_gate(
     expected = "BULLISH" if direction == "BUY" else "BEARISH"
     cross_window = max(2, min(12, int(cross_lookback_candles)))
     pullback_window = max(2, min(8, int(pullback_lookback_candles)))
+    normalized_setup_mode = str(setup_mode or "CONTINUATION").strip().upper()
+    is_reversal_setup = "REVERSAL" in normalized_setup_mode
     result: Dict[str, Any] = {
-        "ready": False, "side": direction, "trigger": "EMA9_EMA15_VWAP_PULLBACK",
-        "setup_mode": str(setup_mode or "CONTINUATION").strip().upper(),
+        "ready": False, "side": direction,
+        "trigger": "EMA9_EMA15_VWAP_REVERSAL" if is_reversal_setup else "EMA9_EMA15_VWAP_PULLBACK",
+        "setup_mode": normalized_setup_mode,
         "reason": "invalid_side", "ema9": None, "ema15": None, "vwap": None,
         "cross_direction": None, "cross_timestamp": None, "pullback_timestamp": None,
         "signal_candle_timestamp": None, "signal_candle_id": None,
@@ -503,7 +506,6 @@ def validate_ema915_vwap_pullback_entry_gate(
         result.update({"reason": "waiting_for_post_cross_pullback",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
-    is_reversal_setup = "REVERSAL" in str(setup_mode or "").strip().upper()
     max_cross_age = cross_window if is_reversal_setup else pullback_window + 1
     if cross_age_bars > max_cross_age:
         result["reason"] = "cross_window_expired" if is_reversal_setup else "pullback_window_expired"
