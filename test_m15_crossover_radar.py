@@ -136,3 +136,105 @@ def test_shared_scanner_cache_reuses_raw_snapshot_and_returns_closed_bars_only(m
     assert fetches == [("TEST/USDT", 150)]
     with ggpbot._SCANNER_FRAME_CACHE_LOCK:
         ggpbot._SCANNER_FRAME_CACHE.clear()
+
+
+
+def test_m15_radar_batches_are_bounded_and_rotate_universe_and_retained_setups(monkeypatch):
+    import ggpbot
+
+    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_active_cursor", 0)
+    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_universe_cursor", 0)
+    universe = [f"COIN{i}/USDT" for i in range(80)]
+    retained = [f"ACTIVE{i}/USDT" for i in range(20)]
+
+    first = ggpbot._select_m15_radar_batch(universe, retained, batch_size=10)
+    second = ggpbot._select_m15_radar_batch(universe, retained, batch_size=10)
+
+    assert len(first) == 10
+    assert len(second) == 10
+    assert len(set(first)) == 10
+    assert len(set(second)) == 10
+    assert len(set(first) & set(retained)) == 5
+    assert len(set(second) & set(retained)) == 5
+    assert set(first) != set(second)
+    assert ggpbot.M15_RADAR_SCAN_INTERVAL_SECONDS == 30
+    assert ggpbot.M15_RADAR_BATCH_SIZE == 10
+
+
+def test_same_symbol_scanner_cache_miss_is_single_flight(monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    import ggpbot
+
+    frame = frame_from_closes([100.0] * 120, NOW - 120 * 900_000)
+    calls = []
+
+    def fake_fetch(symbol, limit):
+        calls.append((symbol, limit))
+        time.sleep(0.03)
+        return frame.copy()
+
+    with ggpbot._SCANNER_FRAME_CACHE_LOCK:
+        ggpbot._SCANNER_FRAME_CACHE.clear()
+    monkeypatch.setattr(ggpbot, "get_ohlcv_safe", fake_fetch)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: ggpbot._get_scanner_raw_frame("LOCK/USDT", 150), range(8)))
+
+    assert len(calls) == 1
+    assert all(result is not None for result in results)
+    with ggpbot._SCANNER_FRAME_CACHE_LOCK:
+        ggpbot._SCANNER_FRAME_CACHE.clear()
+
+
+def test_bingx_429_kline_response_enters_cooldown_without_retry_storm(monkeypatch):
+    import time
+    import ggpbot
+
+    calls = []
+
+    def fetch_ohlcv(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("HTTP 429 Too Many Requests")
+
+    monkeypatch.setattr(ggpbot, "rate_limit", lambda func=None: None)
+    monkeypatch.setattr(ggpbot, "_BINGX_KLINE_COOLDOWN_UNTIL", 0.0)
+    result = ggpbot.safe_api_call(fetch_ohlcv, "BTC/USDT:USDT", "15m", limit=150)
+
+    assert result is None
+    assert len(calls) == 1
+    assert ggpbot._BINGX_KLINE_COOLDOWN_UNTIL > time.monotonic()
+    assert ggpbot._LAST_API_RATE_LIMIT["method"] == "fetch_ohlcv"
+
+
+def test_bingx_418_kline_response_enters_longer_cooldown(monkeypatch):
+    import time
+    import ggpbot
+
+    calls = []
+
+    def fetch_ohlcv(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("HTTP 418 IP banned")
+
+    monkeypatch.setattr(ggpbot, "rate_limit", lambda func=None: None)
+    monkeypatch.setattr(ggpbot, "_BINGX_KLINE_COOLDOWN_UNTIL", 0.0)
+    before = time.monotonic()
+    result = ggpbot.safe_api_call(fetch_ohlcv, "BTC/USDT:USDT", "15m", limit=150)
+
+    assert result is None
+    assert len(calls) == 1
+    assert ggpbot._BINGX_KLINE_COOLDOWN_UNTIL - before >= 59
+
+
+
+def test_m15_radar_market_universe_is_cached_across_30_second_cycles(monkeypatch):
+    import ggpbot
+
+    calls = []
+    monkeypatch.setattr(ggpbot, "get_usdt_perp_symbols", lambda: calls.append(1) or ["BTC/USDT"])
+    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_universe_cache", {})
+    first = ggpbot._get_m15_radar_universe()
+    second = ggpbot._get_m15_radar_universe()
+
+    assert first == second == ["BTC/USDT"]
+    assert len(calls) == 1

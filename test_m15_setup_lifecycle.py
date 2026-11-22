@@ -18,6 +18,7 @@ def _row(symbol="YFI/USDT", status="CROSS_CONFIRMED", direction="SELL", **overri
 
 
 def setup_function():
+    lifecycle.configure_m15_setup_store(None)
     lifecycle.clear_m15_setup_memory()
 
 
@@ -117,3 +118,76 @@ def test_expired_radar_event_expires_retained_candidate():
 def test_runtime_candidate_expires_without_disk_storage():
     lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=BASE_TS + 10_000, cycle_id=1)
     assert lifecycle.list_active_m15_setups(now_ms=BASE_TS + 7 * 60 * 60 * 1000) == []
+
+
+
+def test_m15_registry_restores_active_opportunity_from_runtime_store():
+    class FakeStore:
+        def __init__(self):
+            self.state = {}
+
+        def get_runtime_state(self, key, default=None):
+            return self.state.get(key, default)
+
+        def set_runtime_state(self, key, value):
+            self.state[key] = value
+
+    store = FakeStore()
+    lifecycle.configure_m15_setup_store(store)
+    first = lifecycle.advance_m15_setup_lifecycle(
+        _row(symbol="SOL/USDT"), now_ms=BASE_TS + 10_000, cycle_id=1
+    )
+    assert first["lifecycle_persisted"] is True
+    assert first["lifecycle_event_id"] == f"M15:SOL/USDT:SELL:{BASE_TS}"
+
+    # Simulate a process restart: module memory is empty, SQLite state remains.
+    lifecycle._ACTIVE.clear()
+    lifecycle._STORE_READY = False
+    lifecycle.configure_m15_setup_store(store)
+    active = lifecycle.list_active_m15_setups(now_ms=BASE_TS + 20_000)
+    assert any(item["symbol"] == "SOL/USDT" for item in active)
+    lifecycle.configure_m15_setup_store(None)
+    lifecycle.clear_m15_setup_memory()
+
+
+def test_momentum_expansion_is_classified_for_priority_analysis_not_entry_authority():
+    row = _row(
+        symbol="AVAX/USDT",
+        direction="BUY",
+        closed_price=101.0,
+        session_vwap=100.0,
+        volume_ratio=1.8,
+        evidence={
+            "body_to_range": 0.78,
+            "close_position": 0.92,
+            "displacement_atr": 0.95,
+            "price_extension_atr": 0.70,
+        },
+    )
+    result = lifecycle.advance_m15_setup_lifecycle(
+        row, now_ms=BASE_TS + 10_000, cycle_id=1
+    )
+    assert result["strategy_mode"] == "MOMENTUM_CANDIDATE"
+    assert result["lifecycle_stage"] == "MOMENTUM_EXPANSION_CANDIDATE"
+    assert result["entry_authorization"] is False
+
+
+def test_momentum_expansion_does_not_promote_an_extended_no_chase_move():
+    row = _row(
+        symbol="AVAX/USDT",
+        direction="BUY",
+        closed_price=101.0,
+        session_vwap=100.0,
+        volume_ratio=2.0,
+        evidence={
+            "body_to_range": 0.80,
+            "close_position": 0.95,
+            "displacement_atr": 1.10,
+            "price_extension_atr": 1.9,
+        },
+    )
+    result = lifecycle.advance_m15_setup_lifecycle(
+        row, now_ms=BASE_TS + 10_000, cycle_id=1
+    )
+    assert result["strategy_mode"] != "MOMENTUM_CANDIDATE"
+    assert result["entry_authorization"] is False

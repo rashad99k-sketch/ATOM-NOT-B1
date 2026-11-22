@@ -91,7 +91,8 @@ from ggp_institutional_bridge import build_liquidity_pools
 from roro_confluence import classify_liquidity as _classify_live_liquidity
 from location_authority import validate_location_zone
 from m15_crossover_radar import evaluate_m15_radar
-from m15_setup_lifecycle import advance_m15_setup_lifecycle, list_active_m15_setups, clear_m15_setup_memory
+from m15_setup_lifecycle import (advance_m15_setup_lifecycle, list_active_m15_setups,
+                                 clear_m15_setup_memory, configure_m15_setup_store)
 
 # Observational only: all routine trade-management decisions still come from
 # TradeManagementBoard / LiveTradeManager. This bounded feed never sends orders.
@@ -564,6 +565,8 @@ BINGX_KLINE_MIN_INTERVAL = _env_float_range("BINGX_KLINE_MIN_INTERVAL", 1.05, 1.
 _API_METHOD_MIN_INTERVALS = {"fetch_ohlcv": BINGX_KLINE_MIN_INTERVAL}
 _API_RATE_LOCK = threading.Lock()
 _LAST_API_RATE_LIMIT = {"ts": 0.0, "method": "", "message": ""}
+_BINGX_KLINE_COOLDOWN_UNTIL = 0.0
+_BINGX_KLINE_COOLDOWN_LOCK = threading.RLock()
 
 def rate_limit(func=None):
     """Serialize API request starts, applying endpoint-specific minimum spacing."""
@@ -603,6 +606,17 @@ def cache_set(key, value):
                 CACHE.pop(old_key, None)
 
 def safe_api_call(func, *args, **kwargs):
+    global _BINGX_KLINE_COOLDOWN_UNTIL
+    method_name = getattr(func, "__name__", "exchange_call")
+    if method_name == "fetch_ohlcv":
+        with _BINGX_KLINE_COOLDOWN_LOCK:
+            remaining = _BINGX_KLINE_COOLDOWN_UNTIL - time.monotonic()
+        if remaining > 0:
+            _LAST_API_RATE_LIMIT.update({
+                "ts": time.time(), "method": method_name,
+                "message": f"local kline cooldown active for {remaining:.1f}s",
+            })
+            return None
     # Order creation is non-idempotent. Never automatically retry a timed-out
     # create_order call: BingX may have accepted the first request already.
     is_order_write = getattr(func, "__name__", "") in {"create_order", "create_market_order", "create_limit_order"}
@@ -628,13 +642,24 @@ def safe_api_call(func, *args, **kwargs):
             rate_limit(func)
             return func(*args, **kwargs)
         except Exception as e:
-            if "rate limit" in str(e).lower() or "100410" in str(e):
+            error_text = str(e).lower()
+            rate_limited = (
+                "rate limit" in error_text or "100410" in error_text
+                or "429" in error_text or "418" in error_text
+            )
+            if rate_limited:
+                status_418 = "418" in error_text
+                wait = 60 if status_418 else 30
+                if method_name == "fetch_ohlcv":
+                    with _BINGX_KLINE_COOLDOWN_LOCK:
+                        _BINGX_KLINE_COOLDOWN_UNTIL = max(
+                            _BINGX_KLINE_COOLDOWN_UNTIL, time.monotonic() + wait
+                        )
                 _LAST_API_RATE_LIMIT.update({
                     "ts": time.time(),
-                    "method": getattr(func, "__name__", "exchange_call"),
+                    "method": method_name,
                     "message": str(e)[:180],
                 })
-                wait = min(8, 2 ** attempt)
                 try:
                     log_execution(
                         f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; retry in {wait}s",
@@ -642,6 +667,9 @@ def safe_api_call(func, *args, **kwargs):
                     )
                 except Exception:
                     pass
+                # Do not hammer the endpoint with retries after a rate-limit response.
+                if method_name == "fetch_ohlcv" or status_418:
+                    return None
                 time.sleep(wait)
                 continue
             if attempt == 2:
@@ -7257,6 +7285,8 @@ def dynamic_spread_tolerance(symbol):
 _SCANNER_FRAME_CACHE = {}
 _SCANNER_FRAME_CACHE_LOCK = threading.RLock()
 _SCANNER_FRAME_CACHE_TTL = _env_float_range("SCANNER_FRAME_CACHE_TTL", 90.0, 15.0, 180.0)
+_SCANNER_FRAME_FETCH_LOCKS = {}
+_SCANNER_FRAME_FETCH_LOCKS_GUARD = threading.RLock()
 
 def _get_scanner_frame(symbol, limit=150):
     """One shared M15 discovery snapshot, filtered to fully closed candles."""
@@ -7264,26 +7294,30 @@ def _get_scanner_frame(symbol, limit=150):
 
 
 def _get_scanner_raw_frame(symbol, limit=150):
-    """Return the shared short-lived raw M15 snapshot for provisional radar only."""
+    """Return one shared raw M15 snapshot; serialize same-symbol cache misses."""
     key = str(symbol)
     now = time.monotonic()
     with _SCANNER_FRAME_CACHE_LOCK:
         item = _SCANNER_FRAME_CACHE.get(key)
         if item and now - item[0] < _SCANNER_FRAME_CACHE_TTL:
-            frame = item[1].copy()
-        else:
-            frame = None
-    if frame is None:
-        frame = get_ohlcv_safe(symbol, limit)
-    if frame is not None:
+            return item[1].copy()
+    with _SCANNER_FRAME_FETCH_LOCKS_GUARD:
+        fetch_lock = _SCANNER_FRAME_FETCH_LOCKS.setdefault(key, threading.Lock())
+    with fetch_lock:
+        now = time.monotonic()
         with _SCANNER_FRAME_CACHE_LOCK:
-            if not item or now - item[0] >= _SCANNER_FRAME_CACHE_TTL:
+            item = _SCANNER_FRAME_CACHE.get(key)
+            if item and now - item[0] < _SCANNER_FRAME_CACHE_TTL:
+                return item[1].copy()
+        frame = get_ohlcv_safe(symbol, limit)
+        if frame is not None:
+            with _SCANNER_FRAME_CACHE_LOCK:
                 _SCANNER_FRAME_CACHE[key] = (time.monotonic(), frame.copy())
                 if len(_SCANNER_FRAME_CACHE) > SCANNER_UNIVERSE_MAX + 20:
                     oldest = sorted(_SCANNER_FRAME_CACHE.items(), key=lambda kv: kv[1][0])
                     for old_key, _ in oldest[:max(1, len(_SCANNER_FRAME_CACHE) - SCANNER_UNIVERSE_MAX)]:
                         _SCANNER_FRAME_CACHE.pop(old_key, None)
-    return frame.copy() if frame is not None else None
+        return frame.copy() if frame is not None else None
 
 def get_usdt_perp_symbols():
     try:
@@ -11146,6 +11180,7 @@ def main_loop_sniper():
     last_scan = 0
     last_candidate_scan = 0
     last_flow_update = 0
+    last_m15_radar_scan = 0.0
     try:
         ex.load_markets()
         log_execution(f"Markets loaded", "INFO")
@@ -11190,6 +11225,9 @@ def main_loop_sniper():
                 if INSUFFICIENT_MARGIN_COOLDOWN_UNTIL and time.time() < INSUFFICIENT_MARGIN_COOLDOWN_UNTIL:
                     time.sleep(1)
                     continue
+                if now - last_m15_radar_scan >= M15_RADAR_SCAN_INTERVAL_SECONDS:
+                    dispatch_scanner_task("m15_crossover_radar", run_m15_crossover_radar)
+                    last_m15_radar_scan = now
                 if now - last_scan >= GLOBAL_SCAN_INTERVAL:
                     dispatch_scanner_task("global_discovery", run_global_discovery_scanner)
                     last_scan = now
@@ -11261,6 +11299,10 @@ except Exception as _integration_init_error:
     INSTITUTIONAL_RESOURCE_MANAGER = None
     INSTITUTIONAL_TRADE_JOURNAL = None
     log_execution(f"[INTEGRATION] optional persistence unavailable: {_integration_init_error}", "WARN")
+try:
+    configure_m15_setup_store(INSTITUTIONAL_TRADE_JOURNAL)
+except Exception as _m15_store_exc:
+    log_execution(f"[M15_CROSSOVER] persistent registry initialization failed: {type(_m15_store_exc).__name__}", "ERROR")
 
 # Daily drawdown pause: separate from trade lifecycle and persisted independently.
 LOSS_COOLDOWN_SECONDS = _env_int_range("LOSS_COOLDOWN_SECONDS", 600, 60, 3600)
@@ -12074,101 +12116,6 @@ def run_global_discovery_scanner():
     MEMORY["radar_watchlist"] = radar_candidates[:30]
     MEMORY["radar_top5"] = radar_candidates[:5]
 
-    # M15 crossover radar is observational and shares the existing scanner cache.
-    # It never calls execute_entry and never replaces the institutional Entry Gate.
-    crossover_rows = []
-    crossover_scan_time_ms = int(time.time() * 1000)
-    state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
-    for symbol in symbols:
-        if _discovery_paused():
-            break
-        raw_frame = _get_scanner_raw_frame(symbol, 150)
-        try:
-            row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
-        except Exception as exc:
-            log_execution(
-                f"[M15_CROSSOVER] symbol={symbol} status=UNAVAILABLE reason={type(exc).__name__}",
-                "WARN", debounce_key=f"m15_radar_error:{symbol}", debounce_sec=300
-            )
-            continue
-        if row.get("crossover_status") == "DATA_UNAVAILABLE":
-            continue
-        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
-        prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
-        if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
-            terminal_key = roro_canonical_symbol(symbol)
-            terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
-            if isinstance(terminal_item, dict):
-                terminal_item.pop("m15_setup", None)
-        if row.get("lifecycle_active"):
-            # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
-            canonical_key = roro_canonical_symbol(symbol)
-            watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
-            watch_item["m15_setup"] = {
-                "stage": row.get("lifecycle_stage"),
-                "direction": row.get("lifecycle_direction"),
-                "strategy_mode": row.get("strategy_mode"),
-                "reason": row.get("strategy_mode_reason"),
-                "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
-                "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
-                "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
-                "cycles_seen": row.get("lifecycle_cycles_seen", 1),
-                "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
-                "updated_at_ms": crossover_scan_time_ms,
-                "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
-            }
-            watch_item["last_update"] = crossover_scan_time_ms / 1000.0
-            if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
-                watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
-                watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
-        if isinstance(prior, dict):
-            prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
-                prior.get("last_update", prior.get("last_updated", 0)), 0.0
-            )
-            if prior_age <= 1800:
-                prior_liquidity = prior.get("liquidity") if isinstance(prior.get("liquidity"), dict) else {}
-                prior_regime = prior.get("market_regime")
-                if isinstance(prior_regime, dict):
-                    prior_regime = prior_regime.get("state")
-                row["institutional_setup_state"] = prior.get("decision_state")
-                row["institutional_rejection_reason"] = prior.get("decision_reason")
-                row["liquidity_status"] = prior_liquidity.get("status") or row["liquidity_status"]
-                row["market_regime"] = prior_regime or prior.get("regime") or row["market_regime"]
-                row["order_block"] = prior.get("order_block")
-                row["fvg"] = prior.get("fvg")
-                row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
-        if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
-                or row.get("lifecycle_active")
-                or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
-            crossover_rows.append(row)
-    # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
-    # This is an in-memory candidate feed, not a second scanner or entry authority.
-    MEMORY["m15_setup_watchlist"] = [
-        {
-            "symbol": row.get("symbol"),
-            "side_hint": row.get("lifecycle_direction"),
-            "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
-            "m15_stage": row.get("lifecycle_stage"),
-            "source": "m15_runtime_watchlist",
-        }
-        for row in crossover_rows if row.get("lifecycle_active")
-        and row.get("lifecycle_direction") in {"BUY", "SELL"}
-    ]
-    crossover_rows.sort(key=lambda item: (
-        state_rank.get(str(item.get("crossover_status")), 3),
-        item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
-        item.get("symbol", ""),
-    ))
-    MEMORY["m15_crossover_radar"] = crossover_rows[:60]
-    log_execution(
-        f"[M15_CROSSOVER] observed={len(crossover_rows)} confirmed="
-        f"{sum(x.get('crossover_status') == 'CROSS_CONFIRMED' for x in crossover_rows)} "
-        f"intrabar={sum(x.get('crossover_status') == 'CROSS_DETECTED' for x in crossover_rows)} "
-        f"pre_cross={sum(x.get('crossover_status') == 'PRE_CROSS' for x in crossover_rows)} "
-        "authority=DISCOVERY_ONLY",
-        "INFO", debounce_key="m15_crossover_radar", debounce_sec=30
-    )
-
     # Present a deduplicated blended discovery panel; do not replace the independent RF panel.
     blended = []
     seen = set()
@@ -12217,6 +12164,175 @@ def run_global_discovery_scanner():
         "INFO", debounce_key="discovery_scanner_complete", debounce_sec=60
     )
 
+
+
+M15_RADAR_SCAN_INTERVAL_SECONDS = _env_int_range("M15_RADAR_SCAN_INTERVAL_SECONDS", 30, 10, 120)
+M15_RADAR_BATCH_SIZE = _env_int_range("M15_RADAR_BATCH_SIZE", 10, 5, 20)
+
+
+def _select_m15_radar_batch(symbols, retained_symbols=None, batch_size=None):
+    """Bound M15 work per cycle; prioritize retained setups and rotate the universe."""
+    symbols = list(dict.fromkeys(str(x) for x in (symbols or []) if x))
+    retained = list(dict.fromkeys(str(x) for x in (retained_symbols or []) if x))
+    size = max(1, min(int(batch_size or M15_RADAR_BATCH_SIZE), 20))
+    active_take = min(len(retained), max(1, size // 2))
+    active_cursor = int(MEMORY.get("m15_radar_active_cursor", 0)) % max(1, len(retained))
+    active_batch = [retained[(active_cursor + i) % len(retained)]
+                    for i in range(active_take)] if retained else []
+    if retained:
+        MEMORY["m15_radar_active_cursor"] = (active_cursor + active_take) % len(retained)
+    active_set = set(retained)
+    universe = [symbol for symbol in symbols if symbol not in active_set]
+    remaining = max(0, size - len(active_batch))
+    cursor = int(MEMORY.get("m15_radar_universe_cursor", 0)) % max(1, len(universe))
+    universe_batch = [universe[(cursor + i) % len(universe)]
+                      for i in range(min(remaining, len(universe)))] if universe else []
+    if universe:
+        MEMORY["m15_radar_universe_cursor"] = (cursor + len(universe_batch)) % len(universe)
+    return list(dict.fromkeys(active_batch + universe_batch))
+
+
+def _get_m15_radar_universe():
+    """Reuse the exchange market catalogue; do not reload markets every 30-second scan."""
+    now = time.time()
+    cached = MEMORY.get("m15_radar_universe_cache")
+    if isinstance(cached, dict) and now - float(cached.get("timestamp", 0) or 0) < 900:
+        return list(cached.get("symbols") or [])
+    symbols = list(get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX])
+    MEMORY["m15_radar_universe_cache"] = {"timestamp": now, "symbols": symbols}
+    return symbols
+
+
+def run_m15_crossover_radar(symbols=None):
+    """30-second bounded M15 opportunity scan; one small API-safe batch per cycle."""
+    if _discovery_paused():
+        return False
+    universe = list(symbols) if symbols is not None else _get_m15_radar_universe()
+    try:
+        retained = [item.get("symbol") for item in list_active_m15_setups()
+                    if isinstance(item, dict) and item.get("symbol")]
+    except Exception as retain_exc:
+        retained = []
+        log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
+    symbols = _select_m15_radar_batch(universe, retained)
+    if not symbols:
+        return False
+    log_execution(
+        f"[M15_CROSSOVER] batch={len(symbols)} retained={min(len(retained), max(1, M15_RADAR_BATCH_SIZE // 2))} "
+        f"universe={len(universe)} cadence={M15_RADAR_SCAN_INTERVAL_SECONDS}s "
+        f"kline_min_interval={BINGX_KLINE_MIN_INTERVAL}s",
+        "INFO", debounce_key="m15_radar_batch", debounce_sec=30
+    )
+    new_cross_count = 0
+    # M15 crossover radar is observational and shares the existing scanner cache.
+    # It never calls execute_entry and never replaces the institutional Entry Gate.
+    crossover_rows = []
+    crossover_scan_time_ms = int(time.time() * 1000)
+    state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
+    for symbol in symbols:
+        if _discovery_paused():
+            break
+        raw_frame = _get_scanner_raw_frame(symbol, 150)
+        try:
+            row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
+        except Exception as exc:
+            log_execution(
+                f"[M15_CROSSOVER] symbol={symbol} status=UNAVAILABLE reason={type(exc).__name__}",
+                "WARN", debounce_key=f"m15_radar_error:{symbol}", debounce_sec=300
+            )
+            continue
+        if row.get("crossover_status") == "DATA_UNAVAILABLE":
+            continue
+        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
+        prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
+        prior_setup = prior.get("m15_setup") if isinstance(prior, dict) else {}
+        if (row.get("crossover_status") == "CROSS_CONFIRMED"
+                and row.get("lifecycle_event_id")
+                and (not isinstance(prior_setup, dict)
+                     or prior_setup.get("event_id") != row.get("lifecycle_event_id"))):
+            new_cross_count += 1
+        if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
+            terminal_key = roro_canonical_symbol(symbol)
+            terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
+            if isinstance(terminal_item, dict):
+                terminal_item.pop("m15_setup", None)
+        if row.get("lifecycle_active"):
+            # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
+            canonical_key = roro_canonical_symbol(symbol)
+            watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
+            watch_item["m15_setup"] = {
+                "stage": row.get("lifecycle_stage"),
+                "direction": row.get("lifecycle_direction"),
+                "strategy_mode": row.get("strategy_mode"),
+                "reason": row.get("strategy_mode_reason"),
+                "event_id": row.get("lifecycle_event_id"),
+                "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+                "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
+                "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
+                "cycles_seen": row.get("lifecycle_cycles_seen", 1),
+                "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
+                "updated_at_ms": crossover_scan_time_ms,
+                "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
+            }
+            watch_item["last_update"] = crossover_scan_time_ms / 1000.0
+            if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
+                watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
+                watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
+        if isinstance(prior, dict):
+            prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
+                prior.get("last_update", prior.get("last_updated", 0)), 0.0
+            )
+            if prior_age <= 1800:
+                prior_liquidity = prior.get("liquidity") if isinstance(prior.get("liquidity"), dict) else {}
+                prior_regime = prior.get("market_regime")
+                if isinstance(prior_regime, dict):
+                    prior_regime = prior_regime.get("state")
+                row["institutional_setup_state"] = prior.get("decision_state")
+                row["institutional_rejection_reason"] = prior.get("decision_reason")
+                row["liquidity_status"] = prior_liquidity.get("status") or row["liquidity_status"]
+                row["market_regime"] = prior_regime or prior.get("regime") or row["market_regime"]
+                row["order_block"] = prior.get("order_block")
+                row["fvg"] = prior.get("fvg")
+                row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
+        if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
+                or row.get("lifecycle_active")
+                or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
+            crossover_rows.append(row)
+    # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
+    # This is an in-memory candidate feed, not a second scanner or entry authority.
+    # Rebuild the analysis feed from the full persisted active registry, not only
+    # this cycle's 10-symbol batch; otherwise unscanned opportunities disappear.
+    active_setups = list_active_m15_setups()
+    MEMORY["m15_setup_watchlist"] = [
+        {
+            "symbol": item.get("symbol"),
+            "side_hint": item.get("direction"),
+            "score": 75.0,
+            "m15_stage": item.get("stage"),
+            "m15_event_id": item.get("event_id"),
+            "m15_cross_timestamp_ms": item.get("cross_timestamp_ms"),
+            "source": "m15_runtime_watchlist",
+        }
+        for item in active_setups
+        if item.get("direction") in {"BUY", "SELL"}
+    ]
+    crossover_rows.sort(key=lambda item: (
+        state_rank.get(str(item.get("crossover_status")), 3),
+        item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
+        item.get("symbol", ""),
+    ))
+    MEMORY["m15_crossover_radar"] = crossover_rows[:60]
+    log_execution(
+        f"[M15_CROSSOVER] observed={len(crossover_rows)} confirmed="
+        f"{sum(x.get('crossover_status') == 'CROSS_CONFIRMED' for x in crossover_rows)} "
+        f"intrabar={sum(x.get('crossover_status') == 'CROSS_DETECTED' for x in crossover_rows)} "
+        f"pre_cross={sum(x.get('crossover_status') == 'PRE_CROSS' for x in crossover_rows)} "
+        f"new_events={new_cross_count} active_queue={len(MEMORY.get('m15_setup_watchlist', []))} "
+        "authority=DISCOVERY_ONLY",
+        "INFO", debounce_key="m15_crossover_radar", debounce_sec=30
+    )
+
+    return True
 
 
 # ===== 24/7 TRADE JOURNAL + TRI-STATE EXCHANGE RECOVERY =====
