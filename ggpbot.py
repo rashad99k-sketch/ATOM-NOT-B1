@@ -91,6 +91,7 @@ from ggp_institutional_bridge import build_liquidity_pools
 from roro_confluence import classify_liquidity as _classify_live_liquidity
 from location_authority import validate_location_zone
 from m15_crossover_radar import evaluate_m15_radar
+from m15_setup_lifecycle import advance_m15_setup_lifecycle
 
 # Observational only: all routine trade-management decisions still come from
 # TradeManagementBoard / LiveTradeManager. This bounded feed never sends orders.
@@ -12000,6 +12001,7 @@ def run_global_discovery_scanner():
             continue
         if row.get("crossover_status") == "DATA_UNAVAILABLE":
             continue
+        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms)
         prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
         if isinstance(prior, dict):
             prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
@@ -12018,6 +12020,7 @@ def run_global_discovery_scanner():
                 row["fvg"] = prior.get("fvg")
                 row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
         if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
+                or row.get("lifecycle_active")
                 or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
             crossover_rows.append(row)
     crossover_rows.sort(key=lambda item: (
