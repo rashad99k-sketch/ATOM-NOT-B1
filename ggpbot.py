@@ -91,7 +91,7 @@ from ggp_institutional_bridge import build_liquidity_pools
 from roro_confluence import classify_liquidity as _classify_live_liquidity
 from location_authority import validate_location_zone
 from m15_crossover_radar import evaluate_m15_radar
-from m15_setup_lifecycle import advance_m15_setup_lifecycle
+from m15_setup_lifecycle import advance_m15_setup_lifecycle, list_active_m15_setups
 
 # Observational only: all routine trade-management decisions still come from
 # TradeManagementBoard / LiveTradeManager. This bounded feed never sends orders.
@@ -11906,6 +11906,13 @@ def run_global_discovery_scanner():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
         return
     symbols = get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
+    # Revisit retained setups even when the rotating discovery universe changes.
+    try:
+        retained = [item.get("symbol") for item in list_active_m15_setups()
+                    if isinstance(item, dict) and item.get("symbol")]
+        symbols = list(dict.fromkeys(list(symbols) + retained[:80]))
+    except Exception as retain_exc:
+        log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
     with _SCANNER_FRAME_CACHE_LOCK:
         _SCANNER_FRAME_CACHE.clear()
     if not symbols:
@@ -12001,7 +12008,7 @@ def run_global_discovery_scanner():
             continue
         if row.get("crossover_status") == "DATA_UNAVAILABLE":
             continue
-        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms)
+        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
         prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
         if isinstance(prior, dict):
             prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
