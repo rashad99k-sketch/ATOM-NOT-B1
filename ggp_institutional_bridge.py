@@ -741,7 +741,14 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
         freshness = max(0.0, 1.0 - max(0.0, time.time() - updated) / 1800.0) if updated else 0.0
         # Re-rank using actual structural confluence/proximity from the previous analysis,
         # while rotating all symbols to prevent low-ranked candidates starving forever.
-        priority = (state_bonus + 0.9 * golden_score + 0.55 * ob_near
+        # M15-confirmed setups are a protected analysis queue, not ordinary
+        # rotating discovery candidates. This affects analysis scheduling only.
+        m15_active = (
+            "m15_setup_watchlist" in (item.get("sources") or [])
+            and str(item.get("m15_stage") or "").upper() not in {"INVALIDATED", "EXPIRED", "COMPLETED"}
+        )
+        m15_priority = 5.0 if m15_active else 0.0
+        priority = (m15_priority + state_bonus + 0.9 * golden_score + 0.55 * ob_near
                     + 0.35 * liquidity_quality + 0.45 * analysis_priority
                     + 0.30 * discovery_score + 0.20 * freshness
                     + vwap_cross_priority)
@@ -822,6 +829,9 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
         best["first_seen"] = previous.get("first_seen", time.time())
         best["discovery_sources"] = list(candidate.get("sources", []))
         best["discovery_score"] = float(candidate.get("score", 0) or 0)
+        for field in ("m15_stage", "m15_event_id", "m15_cross_timestamp_ms"):
+            if candidate.get(field) not in (None, ""):
+                best[field] = candidate.get(field)
         best["analysis_priority_score"] = round(_decision_priority(best)[0] * 10
             + float(best.get("score", 0) or 0) * 0.25
             + float((best.get("golden_zone") or {}).get("score", 0) or 0) * 0.15, 2)
