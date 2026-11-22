@@ -21,7 +21,7 @@ class APIGovernorError(RuntimeError):
         self.retry_after = max(0.0, float(retry_after))
         self.code = 429
         super().__init__(
-            f"BingX API governor {reason}: category={self.category} "
+            f"BingX API governor HTTP 429 local cooldown ({reason}): category={self.category} "
             f"retry_after={self.retry_after:.2f}s"
         )
 
@@ -281,7 +281,7 @@ class GovernedExchange:
         value = getattr(self._exchange, name)
         lowered = name.lower()
         if (name in self._LOCAL_METHODS or not callable(value)
-                or not lowered.startswith(self._NETWORK_PREFIXES)):
+                or not (lowered.startswith(self._NETWORK_PREFIXES) or lowered == "load_markets")):
             return value
 
         @functools.wraps(value)
