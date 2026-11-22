@@ -796,11 +796,32 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
         if _stop_requested():
             return _stopped_return()
         if frame is None:
-            best = {"symbol": key, "exchange_symbol": candidate["exchange_symbol"], "side": "UNKNOWN",
-                    "decision_state": "UNKNOWN", "entry_status": "UNKNOWN",
+            # Preserve the last valid institutional snapshot. A failed refresh is
+            # metadata about the fetch, not a new market decision and not a fresh
+            # analysis timestamp. This prevents transient API failures from
+            # replacing a valid setup with UNKNOWN or making stale data look fresh.
+            unavailable_at = time.time()
+            previous_snapshot = out.get(key, {})
+            if isinstance(previous_snapshot, dict) and previous_snapshot:
+                best = dict(previous_snapshot)
+                best.update({
+                    "data_status": "UNAVAILABLE",
+                    "last_fetch_error": fetch_error or "market_data_unavailable",
+                    "last_fetch_at": unavailable_at,
+                    "data_stale": True,
+                })
+            else:
+                best = {
+                    "symbol": key, "exchange_symbol": candidate["exchange_symbol"],
+                    "side": "UNKNOWN", "decision_state": "UNKNOWN",
+                    "entry_status": "UNKNOWN",
                     "decision_reason": fetch_error or "market_data_unavailable",
                     "rejection_reasons": [fetch_error or "market_data_unavailable"],
-                    "data_quality": "DATA_UNAVAILABLE", "last_update": time.time(), "icons": {"status": "⚪"}}
+                    "data_quality": "DATA_UNAVAILABLE", "data_status": "UNAVAILABLE",
+                    "last_update": 0.0, "last_fetch_at": unavailable_at,
+                    "last_fetch_error": fetch_error or "market_data_unavailable",
+                    "data_stale": True, "icons": {"status": "⚪"},
+                }
         else:
             results = []
             for side in ("BUY", "SELL"):
@@ -837,6 +858,10 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
                 best = dict(max(results, key=lambda row: (_decision_priority(row), row.get("side") in hints)))
                 best["side_hint_used_as_gate"] = False
                 best["side_selection_reason"] = "both_directions_analyzed; discovery_side_is_soft_hint"
+            best["data_status"] = "AVAILABLE"
+            best["last_fetch_at"] = time.time()
+            best["last_fetch_error"] = None
+            best["data_stale"] = False
             best["side_analyses"] = {
                 row.get("side"): {"state": row.get("decision_state"), "setup": row.get("decision_setup_type"),
                                   "score": row.get("score"), "reason": row.get("decision_reason"),
