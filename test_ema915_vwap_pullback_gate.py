@@ -87,6 +87,13 @@ def test_missing_ema9_ema15_cross_fails_closed(monkeypatch):
     )
     assert result["ready"] is False
     assert result["reason"] == "missing_fresh_ema9_ema15_cross"
+    # Indicators were successfully calculated; only the fresh crossover is absent.
+    assert result["indicator_status"] == "COMPUTED"
+    assert result["ema9"] == 100.2
+    assert result["ema15"] == 100.0
+    assert result["vwap"] == 99.5
+    assert result["latest_closed_timestamp"] == int(frame.timestamp.iloc[-1])
+    assert result["closed_candle_count"] == len(frame)
 
 
 def test_three_recent_vwap_crosses_block_choppy_entry(monkeypatch):
