@@ -12083,9 +12083,6 @@ def run_global_discovery_scanner():
     MEMORY["radar_watchlist"] = radar_candidates[:30]
     MEMORY["radar_top5"] = radar_candidates[:5]
 
-    # Dedicated M15 radar is also scheduled independently at a shorter interval.
-    run_m15_crossover_radar(symbols=symbols)
-
     # Present a deduplicated blended discovery panel; do not replace the independent RF panel.
     blended = []
     seen = set()
