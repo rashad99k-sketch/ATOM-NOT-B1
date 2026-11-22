@@ -102,10 +102,10 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
         terminal_input = status in {"EXPIRED", "INVALIDATED"} or opportunity in {"EXPIRED", "INVALIDATED"}
         if terminal_input:
             if prior is None or not within_ttl:
+                terminal_stage = "INVALIDATED" if "INVALIDATED" in {status, opportunity} else "EXPIRED"
                 if status == "CROSS_CONFIRMED" and signal_ts:
-                    prior = _new_setup(symbol, direction, now_ms, "INVALIDATED", signal_ts)
+                    prior = _new_setup(symbol, direction, now_ms, terminal_stage, signal_ts)
                 else:
-                    terminal_stage = "INVALIDATED" if "INVALIDATED" in {status, opportunity} else "EXPIRED"
                     row.update({
                         "lifecycle_active": False, "lifecycle_stage": terminal_stage,
                         "strategy_mode": "NO_TRADE_OR_WAIT", "strategy_mode_reason": "RADAR_SETUP_TERMINAL",
