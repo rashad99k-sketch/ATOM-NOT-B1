@@ -662,9 +662,31 @@ def analyze_symbol_both(symbol: str, frame: pd.DataFrame, now_ms: Optional[int] 
     return selected
 
 def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
-                             max_items: int = 150, batch_size: int = 24, enrich=None) -> Dict[str, Dict[str, Any]]:
-    """Rotate all discovery sources in bounded batches and analyze both BUY/SELL."""
+                             max_items: int = 150, batch_size: int = 24, enrich=None,
+                             should_stop=None) -> Dict[str, Dict[str, Any]]:
+    """Rotate discovery in bounded batches; yield safely when a trade/recovery blocks discovery."""
     out = memory.setdefault("watchlist", {})
+
+    def _stop_requested():
+        if should_stop is None:
+            return False
+        try:
+            return bool(should_stop())
+        except Exception:
+            # A failed stop callback must fail closed: discovery is not allowed to continue.
+            return True
+
+    processed = 0
+
+    def _stopped_return():
+        memory["unified_watchlist_last_update"] = time.time()
+        memory["unified_watchlist_last_batch_count"] = processed
+        memory["unified_watchlist_stop_reason"] = "DISCOVERY_PAUSED"
+        return out
+
+    memory.pop("unified_watchlist_stop_reason", None)
+    if _stop_requested():
+        return _stopped_return()
     items = merge_candidates(memory)
     def candidate_rank(pair):
         key, item = pair
@@ -735,6 +757,8 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
     selected = [candidates[(cursor + i) % len(candidates)] for i in range(count)]
     memory["unified_watchlist_cursor"] = (cursor + count) % len(candidates)
     for key, candidate in selected:
+        if _stop_requested():
+            return _stopped_return()
         try:
             frame = fetch_frame(candidate["exchange_symbol"])
         except Exception as exc:
@@ -742,6 +766,9 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
             fetch_error = f"data_fetch_error:{type(exc).__name__}"
         else:
             fetch_error = "missing_or_invalid_market_data" if frame is None else None
+        # A position may have opened while the exchange data request was in flight.
+        if _stop_requested():
+            return _stopped_return()
         if frame is None:
             best = {"symbol": key, "exchange_symbol": candidate["exchange_symbol"], "side": "UNKNOWN",
                     "decision_state": "UNKNOWN", "entry_status": "UNKNOWN",
@@ -749,18 +776,27 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
                     "rejection_reasons": [fetch_error or "market_data_unavailable"],
                     "data_quality": "DATA_UNAVAILABLE", "last_update": time.time(), "icons": {"status": "⚪"}}
         else:
-            results = [analyze_symbol(candidate["exchange_symbol"], side, frame) for side in ("BUY", "SELL")]
-            for result in results:
+            results = []
+            for side in ("BUY", "SELL"):
+                if _stop_requested():
+                    return _stopped_return()
+                result = analyze_symbol(candidate["exchange_symbol"], side, frame)
+                if _stop_requested():
+                    return _stopped_return()
                 if enrich is not None:
                     try:
                         enriched = enrich(frame, result.get("side"), result)
-                        if isinstance(enriched, dict): result.update(enriched)
+                        if isinstance(enriched, dict):
+                            result.update(enriched)
                     except Exception as exc:
                         result["gpp_engine_diagnostics"] = {"status": "PARTIAL", "reason": f"{type(exc).__name__}:{str(exc)[:100]}"}
+                if _stop_requested():
+                    return _stopped_return()
                 result["source"] = candidate.get("source", "discovery")
                 result["sources"] = list(candidate.get("sources", []))
                 result["discovery_score"] = candidate.get("score", 0)
                 result["side_hints"] = list(candidate.get("sides", []))
+                results.append(result)
             ready = [row for row in results if row.get("decision_state") == DecisionState.ENTRY_READY.value]
             if len(ready) > 1:
                 best = dict(max(ready, key=lambda row: (float(row.get("score", 0) or 0), float((row.get("golden_zone") or {}).get("score", 0) or 0))))
@@ -790,6 +826,7 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
             + float(best.get("score", 0) or 0) * 0.25
             + float((best.get("golden_zone") or {}).get("score", 0) or 0) * 0.15, 2)
         out[key] = {**previous, **best}
+        processed += 1
     now = time.time()
     protected = {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION", "NO_CHASE"}
     for key, value in list(out.items()):
@@ -797,6 +834,6 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
         if age > 1800 and value.get("decision_state") not in protected:
             out.pop(key, None)
     memory["unified_watchlist_last_update"] = now
-    memory["unified_watchlist_last_batch_count"] = len(selected)
+    memory["unified_watchlist_last_batch_count"] = processed
     memory["unified_watchlist_source_count"] = len(items)
     return out
