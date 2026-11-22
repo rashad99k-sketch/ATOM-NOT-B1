@@ -12475,6 +12475,15 @@ def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     MEMORY["current_position"] = None
     MEMORY["recovery_status"] = "RECONCILED_FLAT"
     RECOVERY_BLOCK_ENTRIES = False
+    # A new discovery cycle starts only after this exchange-confirmed FLAT.
+    try:
+        clear_m15_setup_memory()
+        for _watch_item in MEMORY.setdefault("watchlist", {}).values():
+            if isinstance(_watch_item, dict):
+                _watch_item.pop("m15_setup", None)
+        log_execution("[DISCOVERY_LIFECYCLE] verified FLAT; runtime M15 candidates cleared for fresh universe scan", "INFO")
+    except Exception as _reset_exc:
+        log_execution(f"[DISCOVERY_LIFECYCLE] runtime reset failed: {type(_reset_exc).__name__}", "WARN")
     clear_position_dashboard()
     STATE["last_close_verified"] = True
     STATE["last_close_exchange_flat_confirmed"] = True
