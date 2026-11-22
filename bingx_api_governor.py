@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import collections
 import functools
-import re
+import json
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -55,6 +56,7 @@ class BingXAPIGovernor:
         cooldown_418: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        state_path: Optional[str] = None,
     ):
         self.intervals = dict(self.DEFAULT_INTERVALS)
         if min_intervals:
@@ -79,6 +81,8 @@ class BingXAPIGovernor:
                      "max_latency_ms": 0.0, "queue_wait_ms": 0.0}
         )
         self._last_error = None
+        self.state_path = str(state_path) if state_path else None
+        self._load_cooldown_state()
 
     @staticmethod
     def classify(method_name: str) -> Tuple[str, int]:
@@ -123,6 +127,51 @@ class BingXAPIGovernor:
         if name.startswith(("fetch_", "create_", "cancel_", "set_", "edit_")):
             return "generic", 3
         return "generic", 3
+
+    def _load_cooldown_state(self) -> None:
+        """Restore rate-limit bans after process restart; never reset a live 418."""
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            now_wall, now_mono = time.time(), self._clock()
+            global_epoch = float(payload.get("global_cooldown_until_epoch", 0) or 0)
+            self._global_cooldown_until = now_mono + max(0.0, global_epoch - now_wall)
+            categories = payload.get("category_cooldown_until_epoch", {})
+            if isinstance(categories, dict):
+                for key, epoch in categories.items():
+                    self._cooldown_until[str(key)] = now_mono + max(0.0, float(epoch or 0) - now_wall)
+        except FileNotFoundError:
+            return
+        except Exception:
+            # Corrupt state must not crash trading startup; normal API limits remain active.
+            return
+
+    def _persist_cooldown_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            now_mono, now_wall = self._clock(), time.time()
+            payload = {
+                "global_cooldown_until_epoch": now_wall + max(0.0, self._global_cooldown_until - now_mono),
+                "category_cooldown_until_epoch": {
+                    key: now_wall + max(0.0, value - now_mono)
+                    for key, value in self._cooldown_until.items() if value > now_mono
+                },
+                "updated_at_epoch": now_wall,
+            }
+            parent = os.path.dirname(os.path.abspath(self.state_path))
+            os.makedirs(parent, exist_ok=True)
+            temporary = f"{self.state_path}.{os.getpid()}.tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.state_path)
+        except Exception:
+            # Persistence is best-effort; in-memory cooldown remains enforced.
+            return
 
     def _cooldown_remaining(self, category: str, now: float) -> float:
         return max(
@@ -176,6 +225,7 @@ class BingXAPIGovernor:
                 self._cooldown_until[category] = max(
                     self._cooldown_until.get(category, 0.0), now + self.cooldown_429
                 )
+            self._persist_cooldown_state()
             self._condition.notify_all()
 
     def _enter(self, category: str, priority: int) -> float:
