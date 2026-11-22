@@ -121,3 +121,38 @@ def test_reversal_cannot_use_a_sweep_that_predates_the_ema915_cross():
 
     assert result["ready"] is False
     assert result["reason"] == "institutional_sweep_not_after_ema915_cross"
+
+
+def test_failed_auction_reversal_requires_its_own_evidence_set():
+    frame, now_ms = _cross_frame()
+    evidence = [
+        "failed_auction:ABOVE_VALUE",
+        "outside_acceptance_failed:CONFIRMED",
+        "reclaim:VWAP_RECLAIMED",
+        "closed_mss:BULLISH",
+        "post_mss_retest:ORDER_BLOCK",
+        "directional_trigger:BULLISH",
+    ]
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=float(frame["close"].iloc[-1]),
+        setup_mode="FAILED_AUCTION_REVERSAL",
+        institutional_evidence=evidence,
+        institutional_event_id="failed-auction-event",
+        institutional_origin_timestamp=int(frame["timestamp"].iloc[-4]),
+    )
+    assert result["ready"] is True
+    assert result["setup_mode"] == "FAILED_AUCTION_REVERSAL"
+
+
+def test_reversal_fails_closed_without_a_known_sweep_timestamp():
+    frame, now_ms = _cross_frame()
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=float(frame["close"].iloc[-1]),
+        setup_mode="LIQUIDITY_SWEEP_REVERSAL",
+        institutional_evidence=REVERSAL_EVIDENCE,
+        institutional_event_id="missing-origin-event",
+    )
+    assert result["ready"] is False
+    assert result["reason"] == "institutional_sweep_timestamp_unavailable"
