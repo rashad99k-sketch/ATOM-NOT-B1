@@ -364,6 +364,7 @@ def validate_ema915_vwap_pullback_entry_gate(
     setup_mode: str = "CONTINUATION",
     institutional_evidence: Optional[List[str]] = None,
     institutional_event_id: Optional[str] = None,
+    institutional_origin_timestamp: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Primary entry authority: fresh EMA9/EMA15 cross, VWAP alignment,
     a subsequent pullback into the EMA band, then a closed-candle continuation
@@ -524,6 +525,22 @@ def validate_ema915_vwap_pullback_entry_gate(
     # evidence. They must not be forced through the continuation-only EMA-band
     # pullback and prior-candle breakout sequence below.
     if is_reversal_setup:
+        try:
+            sweep_timestamp = int(institutional_origin_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            result["reason"] = "institutional_sweep_timestamp_unavailable"
+            return result
+        # Enforce the requested chronology: EMA9/EMA15 cross first, then a
+        # later liquidity event, then the institutional engine's later MSS,
+        # post-MSS retest and directional trigger.
+        if sweep_timestamp <= cross_ts or sweep_timestamp > latest_ts:
+            result.update({
+                "reason": "institutional_sweep_not_after_ema915_cross",
+                "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+                "institutional_origin_timestamp": sweep_timestamp,
+                "latest_closed_timestamp": latest_ts,
+            })
+            return result
         evidence = [str(item).strip().lower() for item in (institutional_evidence or [])]
         setup_name = str(setup_mode or "").strip().upper()
         if "FAILED_AUCTION" in setup_name:
@@ -576,9 +593,10 @@ def validate_ema915_vwap_pullback_entry_gate(
             "cross_timestamp": cross_ts,
             "cross_age_bars": cross_age_bars,
             "signal_candle_timestamp": signal_ts,
-            "signal_candle_id": f"{direction}:EMA915_REVERSAL:{cross_ts}:EVENT:{event_fragment}:TRIGGER:{signal_ts}",
+            "signal_candle_id": f"{direction}:EMA915_REVERSAL:{cross_ts}:SWEEP:{sweep_timestamp}:EVENT:{event_fragment}:TRIGGER:{signal_ts}",
             "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
             "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
+            "institutional_origin_timestamp": sweep_timestamp,
             "liquidity_sweep_confirmed": True,
             "reclaim_confirmed": True,
             "mss_confirmed": True,
