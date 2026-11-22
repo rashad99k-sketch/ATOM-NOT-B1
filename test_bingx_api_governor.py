@@ -312,3 +312,70 @@ def test_market_data_429_pauses_both_kline_and_ticker_requests():
         exchange.fetch_ticker("BTC/USDT")
     assert caught.value.code == 429
     assert len(calls) == 1
+
+
+def test_identical_concurrent_gets_are_single_flight_not_cached():
+    raw = FakeExchange()
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_request(path, api="public", method="GET", params=None,
+                     headers=None, body=None, config=None):
+        calls.append((path, method))
+        entered.set()
+        release.wait(timeout=2)
+        return []
+
+    raw.request = slow_request
+    exchange = GovernedExchange(raw, make_governor(max_concurrent=4))
+    results = []
+    threads = [threading.Thread(
+        target=lambda: results.append(exchange.fetch_positions(["BTC/USDT"]))
+    ) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    assert entered.wait(timeout=1)
+    time.sleep(0.03)
+    assert len(calls) == 1
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 8
+    assert len(calls) == 1
+
+
+def test_order_write_invalidates_inflight_get_deduplication():
+    raw = FakeExchange()
+    position_calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def controlled_request(path, api="public", method="GET", params=None,
+                           headers=None, body=None, config=None):
+        if path == "user/positions":
+            position_calls.append(path)
+            entered.set()
+            release.wait(timeout=2)
+            return []
+        return {"ok": True}
+
+    raw.request = controlled_request
+    exchange = GovernedExchange(raw, make_governor(max_concurrent=4))
+    first = threading.Thread(target=exchange.fetch_positions, args=(["BTC/USDT"],))
+    first.start()
+    assert entered.wait(timeout=1)
+
+    # A write changes the request epoch. A later GET must fetch fresh data,
+    # not join a pre-write in-flight snapshot.
+    exchange.create_order("BTC/USDT", "market", "buy", 1)
+    second = threading.Thread(target=exchange.fetch_positions, args=(["BTC/USDT"],))
+    second.start()
+    time.sleep(0.03)
+    assert len(position_calls) == 2
+
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert not first.is_alive() and not second.is_alive()
