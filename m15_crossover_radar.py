@@ -160,6 +160,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     chart_start = max(0, len(closed) - 60)
     chart = {
         "timestamps": [int(x) for x in closed["timestamp"].iloc[chart_start:]],
+        "open": [float(x) for x in closed["open"].iloc[chart_start:]],
         "close": [float(x) for x in close.iloc[chart_start:]],
         "high": [float(x) for x in closed["high"].iloc[chart_start:]],
         "low": [float(x) for x in closed["low"].iloc[chart_start:]],
