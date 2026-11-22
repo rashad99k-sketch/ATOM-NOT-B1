@@ -14,7 +14,7 @@ def _cross_frame():
         100.02, 100.04, 100.06, 100.08,
         100.10, 100.12, 100.14, 100.16,
     ]
-    start = 1_800_000_000_000  # UTC session boundary
+    start = (1_800_000_000_000 // 86_400_000) * 86_400_000  # exact UTC session midnight
     rows = []
     for index, close in enumerate(closes):
         rows.append({
