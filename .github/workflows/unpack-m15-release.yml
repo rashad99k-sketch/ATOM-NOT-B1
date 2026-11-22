@@ -51,7 +51,7 @@ jobs:
           tmp="$(mktemp -d)"
           unzip -q "$archive" -d "$tmp"
           test -d "$tmp/NAISO-LIVE-M15"
-          rsync -a --exclude='GGP_RELEASE_9_LONG_RUN_STABILITY_HARDENED.zip' "$tmp/NAISO-LIVE-M15/" ./
+          rsync -a --exclude='GGP_RELEASE_9_LONG_RUN_STABILITY_HARDENED.zip' --exclude='.github/workflows/***' "$tmp/NAISO-LIVE-M15/" ./
           rm -rf "$tmp"
           rm -f "$archive"
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
