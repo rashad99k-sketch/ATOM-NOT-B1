@@ -6152,6 +6152,7 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
             setup_mode=str(management_state.get("entry_gate_setup_mode") or "CONTINUATION"),
             institutional_evidence=list(management_state.get("entry_gate_evidence") or []),
             institutional_event_id=str(management_state.get("entry_gate_event_id") or ""),
+            institutional_origin_timestamp=management_state.get("entry_gate_origin_timestamp"),
         )
         if (not final_gate.get("ready")
                 or final_gate.get("signal_candle_id") != gate_snapshot.get("signal_candle_id")):
@@ -6592,6 +6593,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
     gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
     gate_evidence = list(institutional_entry_ctx.get("evidence") or [])
     gate_event_id = str(institutional_entry_ctx.get("event_id") or "")
+    gate_origin_timestamp = institutional_entry_ctx.get("origin_timestamp")
     gate_frame = institutional_entry_ctx.get("closed_candle_frame")
     gate_frame_source = institutional_entry_ctx.get("closed_candle_source") or "ENTRY_CONTEXT"
     gate_tf = str(institutional_entry_ctx.get("candle_timeframe") or INTERVAL)
@@ -6607,6 +6609,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             pullback_lookback_candles=5, current_price=float(price),
             setup_mode=gate_setup_mode, institutional_evidence=gate_evidence,
             institutional_event_id=gate_event_id,
+            institutional_origin_timestamp=gate_origin_timestamp,
         )
         gate_result["setup_mode"] = gate_setup_mode
         gate_result["frame_source"] = gate_frame_source
@@ -7085,6 +7088,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "entry_gate_setup_mode": gate_setup_mode,
         "entry_gate_evidence": list(gate_evidence),
         "entry_gate_event_id": gate_event_id,
+        "entry_gate_origin_timestamp": gate_origin_timestamp,
     }
     if daily_loss_cooldown_active():
         log_execution(f"[ENTRY_BLOCKED] cooldown activated during validation; order not submitted for {symbol}", "WARN")
@@ -10868,6 +10872,7 @@ def sniper_engine_v2():
             tp2 = price * (1.0 - tp2_move if side == "SELL" else 1.0 + tp2_move)
             _INSTITUTIONAL_ENTRY_CONTEXT = {
                 "setup_type": setup, "event_id": event_id, "evidence": evidence,
+                "origin_timestamp": authority.get("origin_timestamp"),
                 "structural_stop": structural_stop, "pullback_type": "SNIPER_ZONE_RETEST",
                 "trading_mode": "SNIPER",
                 "entry_behavior": "RETEST",
@@ -11866,6 +11871,7 @@ def smart_opportunity_selection():
                 "setup_type": setup,
                 "event_id": item.get("event_id"),
                 "evidence": evidence,
+                "origin_timestamp": item.get("origin_timestamp"),
                 "structural_stop": float(sl),
                 "trading_mode": str(item.get("trading_mode") or market_intelligence.get("mode") or "UNCLASSIFIED"),
                 "entry_behavior": str(item.get("entry_behavior") or market_intelligence.get("entry_behavior") or "WAIT_FOR_STRUCTURE"),
