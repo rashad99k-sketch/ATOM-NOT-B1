@@ -115,8 +115,8 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
         chart = row.get("chart") or {}
         ts = chart.get("timestamps") or []
         highs, lows = chart.get("high") or [], chart.get("low") or []
+        opens, closes = chart.get("open") or [], chart.get("close") or []
         e9s, e15s = chart.get("ema9") or [], chart.get("ema15") or []
-        closes = chart.get("close") or []
         start_ts = int(prior.get("cross_timestamp_ms") or prior.get("first_seen_ms") or 0)
         touched_idx = None
         for i in range(min(len(ts), len(highs), len(lows), len(e9s), len(e15s))):
@@ -128,11 +128,20 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
         if touched_idx is not None and prior.get("stage") in {"WAITING_FOR_PULLBACK", "WAITING_FOR_CANDLE_CLOSE"}:
             prior["stage"] = "PULLBACK_DETECTED"
             prior["pullback_timestamp_ms"] = int(ts[touched_idx])
-        if touched_idx is not None and len(closes) >= 2 and len(ts) >= 2:
-            last_close = float(closes[-1])
+        # Retest confirmation must be a later closed candle with directional rejection;
+        # a touch by itself is never promoted to a confirmed retest.
+        if (touched_idx is not None and len(closes) >= 2 and len(ts) >= 2
+                and len(opens) == len(closes) == len(highs) == len(lows)
+                and len(ts) == len(closes) and touched_idx < len(closes) - 1):
+            o, c, h, low = map(float, (opens[-1], closes[-1], highs[-1], lows[-1]))
+            candle_range = max(0.0, h - low)
+            lower_wick = (min(o, c) - low) / candle_range if candle_range else 0.0
+            upper_wick = (h - max(o, c)) / candle_range if candle_range else 0.0
             prior["rejection_confirmed"] = (
-                last_close > float(closes[-2]) if prior.get("direction") == "BUY"
-                else last_close < float(closes[-2]) if prior.get("direction") == "SELL" else False
+                c > o and c > float(closes[-2]) and lower_wick >= 0.10
+                if prior.get("direction") == "BUY" else
+                c < o and c < float(closes[-2]) and upper_wick >= 0.10
+                if prior.get("direction") == "SELL" else False
             )
             if prior["rejection_confirmed"] and prior.get("stage") == "PULLBACK_DETECTED":
                 prior["stage"] = "RETEST_CONFIRMED"
