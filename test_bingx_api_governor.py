@@ -39,7 +39,9 @@ class FakeExchange:
         return {"id": "order-1"}
 
     def load_markets(self):
+        # One CCXT call can issue multiple HTTP requests; each consumes budget.
         self.request("exchangeInfo", "public", "GET", {})
+        self.request("swap/contracts", "public", "GET", {})
         return {"BTC/USDT:USDT": {"id": "BTC-USDT"}}
 
     def market(self, symbol):
@@ -79,8 +81,8 @@ def test_proxy_governs_each_actual_ccxt_http_request_including_raw_endpoints():
     assert exchange.market("BTC/USDT")["id"] == "BTC/USDT"
 
     snap = governor.snapshot()
-    assert snap["totals"]["attempts"] == 5
-    assert snap["categories"]["market_data"]["attempts"] == 2
+    assert snap["totals"]["attempts"] == 6
+    assert snap["categories"]["market_data"]["attempts"] == 3
     assert snap["categories"]["account_positions"]["attempts"] == 1
     assert snap["categories"]["account_balance"]["attempts"] == 1
     assert snap["categories"]["account_orders"]["attempts"] == 1
@@ -292,3 +294,21 @@ def test_total_and_free_balance_readers_share_one_bingx_payload(monkeypatch):
         ggpbot.CACHE.pop("bingx_balance_payload", None)
         ggpbot.CACHE.pop("balance", None)
         ggpbot.CACHE.pop("free_balance", None)
+
+
+def test_market_data_429_pauses_both_kline_and_ticker_requests():
+    raw = FakeExchange()
+    calls = []
+    def limited(path, api="public", method="GET", params=None,
+                headers=None, body=None, config=None):
+        calls.append(path)
+        raise RuntimeError("HTTP 429 Too Many Requests")
+    raw.request = limited
+    exchange = GovernedExchange(raw, make_governor(cooldown_429=0.2))
+
+    with pytest.raises(RuntimeError, match="429"):
+        exchange.fetch_ohlcv("BTC/USDT", "15m", 150)
+    with pytest.raises(APIGovernorError) as caught:
+        exchange.fetch_ticker("BTC/USDT")
+    assert caught.value.code == 429
+    assert len(calls) == 1
