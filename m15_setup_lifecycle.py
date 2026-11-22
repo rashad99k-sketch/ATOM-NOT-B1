@@ -103,7 +103,6 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
                     "last_seen_ms": now_ms, "pullback_timestamp_ms": None,
                     "retest_timestamp_ms": None, "rejection_confirmed": False,
                     "cycles_seen": 1, "last_cycle_id": cycle_id,
-                    "cycles_seen": 1, "last_cycle_id": cycle_id,
                 }
             else:
                 if int(prior.get("last_cycle_id") or -1) != cycle_id:
@@ -117,6 +116,7 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
                     "stage": "CROSS_APPROACHING", "first_seen_ms": now_ms,
                     "last_seen_ms": now_ms, "pullback_timestamp_ms": None,
                     "retest_timestamp_ms": None, "rejection_confirmed": False,
+                    "cycles_seen": 1, "last_cycle_id": cycle_id,
                 }
             else:
                 prior["last_seen_ms"] = now_ms
