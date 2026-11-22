@@ -48,6 +48,7 @@ def test_reversal_uses_crossover_as_trigger_then_requires_institutional_sweep_ms
         setup_mode="LIQUIDITY_SWEEP_REVERSAL",
         institutional_evidence=REVERSAL_EVIDENCE,
         institutional_event_id="roro-event-123",
+        institutional_origin_timestamp=int(frame["timestamp"].iloc[-4]),
     )
 
     assert result["ready"] is True
@@ -69,6 +70,7 @@ def test_reversal_cannot_enter_when_sweep_or_post_mss_retest_evidence_is_missing
         setup_mode="LIQUIDITY_SWEEP_REVERSAL",
         institutional_evidence=incomplete,
         institutional_event_id="roro-event-incomplete",
+        institutional_origin_timestamp=int(frame["timestamp"].iloc[-4]),
     )
 
     assert result["ready"] is False
@@ -99,7 +101,23 @@ def test_reversal_cross_must_match_requested_direction():
         setup_mode="LIQUIDITY_SWEEP_REVERSAL",
         institutional_evidence=REVERSAL_EVIDENCE,
         institutional_event_id="roro-event-wrong-side",
+        institutional_origin_timestamp=int(frame["timestamp"].iloc[-4]),
     )
 
     assert result["ready"] is False
     assert result["reason"] == "ema9_ema15_cross_direction_mismatch"
+
+
+def test_reversal_cannot_use_a_sweep_that_predates_the_ema915_cross():
+    frame, now_ms = _cross_frame()
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=float(frame["close"].iloc[-1]),
+        setup_mode="LIQUIDITY_SWEEP_REVERSAL",
+        institutional_evidence=REVERSAL_EVIDENCE,
+        institutional_event_id="roro-event-before-cross",
+        institutional_origin_timestamp=int(frame["timestamp"].iloc[20]),
+    )
+
+    assert result["ready"] is False
+    assert result["reason"] == "institutional_sweep_not_after_ema915_cross"
