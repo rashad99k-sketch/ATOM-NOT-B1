@@ -12010,6 +12010,27 @@ def run_global_discovery_scanner():
             continue
         row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
         prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
+        if row.get("lifecycle_active"):
+            # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
+            canonical_key = roro_canonical_symbol(symbol)
+            watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
+            watch_item["m15_setup"] = {
+                "stage": row.get("lifecycle_stage"),
+                "direction": row.get("lifecycle_direction"),
+                "strategy_mode": row.get("strategy_mode"),
+                "reason": row.get("strategy_mode_reason"),
+                "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+                "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
+                "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
+                "cycles_seen": row.get("lifecycle_cycles_seen", 1),
+                "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
+                "updated_at_ms": crossover_scan_time_ms,
+                "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
+            }
+            watch_item["last_update"] = crossover_scan_time_ms / 1000.0
+            if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
+                watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
+                watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
         if isinstance(prior, dict):
             prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
                 prior.get("last_update", prior.get("last_updated", 0)), 0.0
