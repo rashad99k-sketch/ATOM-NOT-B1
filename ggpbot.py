@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from html import escape as html_escape
 
 import ccxt
+from bingx_api_governor import BingXAPIGovernor, GovernedExchange
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify, request
@@ -621,7 +622,7 @@ def safe_api_call(func, *args, **kwargs):
     # create_order call: BingX may have accepted the first request already.
     is_order_write = getattr(func, "__name__", "") in {"create_order", "create_market_order", "create_limit_order"}
     if is_order_write:
-        rate_limit(func)
+        # GovernedExchange owns the single global request budget.
         try:
             return func(*args, **kwargs)
         except Exception as exc:
@@ -639,13 +640,13 @@ def safe_api_call(func, *args, **kwargs):
             raise
     for attempt in range(3):
         try:
-            rate_limit(func)
+            # GovernedExchange owns the single global request budget.
             return func(*args, **kwargs)
         except Exception as e:
             error_text = str(e).lower()
             rate_limited = (
                 "rate limit" in error_text or "100410" in error_text
-                or "429" in error_text or "418" in error_text
+                or "429" in error_text or "418" in error_text or "cooldown" in error_text
             )
             if rate_limited:
                 status_418 = "418" in error_text
@@ -662,12 +663,14 @@ def safe_api_call(func, *args, **kwargs):
                 })
                 try:
                     log_execution(
-                        f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; retry in {wait}s",
+                        f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; governor cooldown={wait}s",
                         "WARN", debounce_key=f"api_backoff_{getattr(func, '__name__', 'call')}", debounce_sec=30
                     )
                 except Exception:
                     pass
-                # Do not hammer the endpoint with retries after a rate-limit response.
+                # Keep the legacy bounded wait for endpoint-scoped 429s. The
+                # central governor blocks queued requests during this interval,
+                # so workers resume through one scheduler rather than stampeding.
                 if method_name == "fetch_ohlcv" or status_418:
                     return None
                 time.sleep(wait)
@@ -889,13 +892,32 @@ LAST_ENTRY_PER_SYMBOL = {}
 
 INSUFFICIENT_MARGIN_COOLDOWN_UNTIL = None
 
-ex = ccxt.bingx({
+_raw_ex = ccxt.bingx({
     "apiKey": API_KEY,
     "secret": API_SECRET,
-    "enableRateLimit": True,
+    "enableRateLimit": False,  # BingXAPIGovernor is the single shared request scheduler.
     "timeout": _env_int_range("EXCHANGE_HTTP_TIMEOUT_MS", 12000, 5000, 60000),
     "options": {"defaultType": "swap"}
 })
+API_GOVERNOR = BingXAPIGovernor(
+    min_intervals={
+        "market_kline": BINGX_KLINE_MIN_INTERVAL,
+        "market_data": _env_float_range("BINGX_MARKET_DATA_MIN_INTERVAL", 0.05, 0.02, 0.25),
+        "account_balance": _env_float_range("BINGX_ACCOUNT_MIN_INTERVAL", 0.25, 0.20, 1.0),
+        "account_positions": _env_float_range("BINGX_ACCOUNT_MIN_INTERVAL", 0.25, 0.20, 1.0),
+        "account_orders": _env_float_range("BINGX_ACCOUNT_MIN_INTERVAL", 0.25, 0.20, 1.0),
+        "account_trades": _env_float_range("BINGX_ACCOUNT_MIN_INTERVAL", 0.25, 0.20, 1.0),
+        "order_write": _env_float_range("BINGX_ORDER_MIN_INTERVAL", 0.25, 0.20, 2.0),
+        "leverage_write": 0.55,
+    },
+    max_concurrent=_env_int_range("BINGX_MAX_CONCURRENT_REQUESTS", 4, 1, 8),
+    cooldown_429=_env_float_range("BINGX_429_COOLDOWN_SECONDS", 30.0, 5.0, 300.0),
+    cooldown_418=_env_float_range("BINGX_418_COOLDOWN_SECONDS", 60.0, 30.0, 900.0),
+    state_path=os.path.join(ENV_DIR, "data", "bingx_api_governor_state.json"),
+)
+# All scanners, dashboard readers, reconciliation and TradeExecutionService
+# share this proxy. Keep the raw CCXT object private to this initialization.
+ex = GovernedExchange(_raw_ex, API_GOVERNOR)
 
 def normalize_symbol(symbol):
     if not symbol.endswith(":USDT"):
@@ -1070,10 +1092,23 @@ def fetch_ticker(symbol):
 def fetch_orderbook(symbol, limit=20):
     return safe_api_call(ex.fetch_order_book, normalize_symbol(symbol), limit)
 
+def get_balance_payload():
+    """One shared BingX account snapshot for total and free USDT balance."""
+    if PAPER_MODE:
+        return {"total": {"USDT": paper["balance"]}, "free": {"USDT": paper["balance"]}}
+    cached = cache_get("bingx_balance_payload", 5)
+    if cached is not None:
+        return cached
+    payload = safe_api_call(ex.fetch_balance)
+    if isinstance(payload, dict):
+        cache_set("bingx_balance_payload", payload)
+        return payload
+    return None
+
 def get_balance():
     if PAPER_MODE:
         return paper["balance"]
-    bal = safe_api_call(ex.fetch_balance)
+    bal = get_balance_payload()
     if bal:
         return bal.get("total", {}).get("USDT", 0.0)
     return 0.0
@@ -1081,7 +1116,7 @@ def get_balance():
 def get_free_balance():
     if PAPER_MODE:
         return paper["balance"]
-    bal = safe_api_call(ex.fetch_balance)
+    bal = get_balance_payload()
     if bal:
         return bal.get("free", {}).get("USDT", 0.0)
     return 0.0
@@ -10243,6 +10278,7 @@ def health():
         "proximity_scanner": MEMORY.get("ema9_vwap_proximity_scanner_meta", {}).get("state", "UNKNOWN"),
         "trade_management_authority": "TradeManagementBoard / LiveTradeManager",
         "trade_management_events": len(TRADE_MANAGEMENT_LOG),
+        "api_governor": API_GOVERNOR.snapshot(),
         "telegram": TELEGRAM_NOTIFIER.status(),
     })
 
@@ -11107,9 +11143,17 @@ def sync_position_with_exchange(symbol):
 
 def get_realized_pnl(symbol, limit=100):
     try:
+        cache_key = f"realized_pnl_{normalize_symbol(symbol)}_{int(limit)}"
+        cached_pnl = cache_get(cache_key, 30)
+        if cached_pnl is not None:
+            return cached_pnl
         trades = safe_api_call(ex.fetch_my_trades, normalize_symbol(symbol), limit=limit)
-        if not trades:
+        if trades is None:
             return 0.0, 0.0
+        if not trades:
+            result = (0.0, 0.0)
+            cache_set(cache_key, result)
+            return result
         buy_value = 0.0
         sell_value = 0.0
         for trade in trades:
@@ -11124,7 +11168,9 @@ def get_realized_pnl(symbol, limit=100):
         pnl = sell_value - buy_value
         balance = get_balance_safe()
         pnl_pct = (pnl / balance * 100) if balance > 0 else 0.0
-        return pnl, pnl_pct
+        result = (pnl, pnl_pct)
+        cache_set(cache_key, result)
+        return result
     except Exception as e:
         log_execution(f"[SYNC] error in get_realized_pnl: {e}", "ERROR")
         return 0.0, 0.0
