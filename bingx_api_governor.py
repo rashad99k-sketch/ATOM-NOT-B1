@@ -6,7 +6,7 @@ This module deliberately does not cache exchange responses or retry writes.
 from __future__ import annotations
 
 import collections
-import functools
+import copy
 import json
 import os
 import threading
@@ -81,6 +81,9 @@ class BingXAPIGovernor:
                      "max_latency_ms": 0.0, "queue_wait_ms": 0.0}
         )
         self._last_error = None
+        self._inflight_lock = threading.RLock()
+        self._inflight_gets = {}
+        self._write_epoch = 0
         self.state_path = str(state_path) if state_path else None
         self._load_cooldown_state()
 
@@ -199,10 +202,68 @@ class BingXAPIGovernor:
             return "generic", 1
         return "generic", 3
 
+    @staticmethod
+    def _stable_get_key(path: Any, api: Any, params: Any) -> str:
+        def clean(value):
+            if isinstance(value, dict):
+                return {
+                    str(key): clean(item) for key, item in value.items()
+                    if str(key).lower() not in {"timestamp", "signature", "recvwindow", "apikey"}
+                }
+            if isinstance(value, (list, tuple)):
+                return [clean(item) for item in value]
+            return value
+        try:
+            return json.dumps(
+                [str(path), str(api), clean(params or {})],
+                sort_keys=True, separators=(",", ":"), default=str,
+            )
+        except Exception:
+            return f"{path}|{api}|{repr(params)}"
+
     def call_endpoint(self, path: Any, api: Any, http_method: Any,
                       function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         category, priority = self.classify_request(path, api, http_method)
-        return self._call_classified(category, priority, f"request:{path}", function, *args, **kwargs)
+        verb = str(http_method or "GET").upper()
+        # Writes advance an epoch. A read started before an order/setting write
+        # can never be shared with a read started after that write.
+        with self._inflight_lock:
+            if verb != "GET":
+                self._write_epoch += 1
+                epoch = self._write_epoch
+            else:
+                epoch = self._write_epoch
+        if verb != "GET":
+            return self._call_classified(category, priority, f"request:{path}", function, *args, **kwargs)
+
+        key = (epoch, self._stable_get_key(path, api, args[3] if len(args) > 3 else kwargs.get("params")))
+        with self._inflight_lock:
+            entry = self._inflight_gets.get(key)
+            owner = entry is None
+            if owner:
+                entry = {"event": threading.Event(), "result": None, "error": None}
+                self._inflight_gets[key] = entry
+        if not owner:
+            if not entry["event"].wait(timeout=30.0):
+                raise TimeoutError(f"Timed out waiting for shared BingX GET {path}")
+            if entry["error"] is not None:
+                raise entry["error"]
+            try:
+                return copy.deepcopy(entry["result"])
+            except Exception:
+                return entry["result"]
+
+        try:
+            result = self._call_classified(category, priority, f"request:{path}", function, *args, **kwargs)
+            entry["result"] = result
+            return result
+        except BaseException as exc:
+            entry["error"] = exc
+            raise
+        finally:
+            entry["event"].set()
+            with self._inflight_lock:
+                self._inflight_gets.pop(key, None)
 
     def _cooldown_remaining(self, category: str, now: float) -> float:
         return max(
