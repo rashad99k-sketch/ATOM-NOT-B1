@@ -253,9 +253,15 @@ class BingXAPIGovernor:
                     self._global_cooldown_until, now + self.cooldown_418
                 )
             else:
-                self._cooldown_until[category] = max(
-                    self._cooldown_until.get(category, 0.0), now + self.cooldown_429
-                )
+                affected = {category}
+                # Market-data 429s may reflect the shared IP budget; pause both
+                # Kline and ticker/order-book reads rather than shifting load.
+                if category in {"market_kline", "market_data"}:
+                    affected.update({"market_kline", "market_data"})
+                for item in affected:
+                    self._cooldown_until[item] = max(
+                        self._cooldown_until.get(item, 0.0), now + self.cooldown_429
+                    )
             self._persist_cooldown_state()
             self._condition.notify_all()
 
