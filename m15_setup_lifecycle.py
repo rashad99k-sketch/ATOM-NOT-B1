@@ -111,6 +111,7 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
         if now - float(prior.get("_stored_at", now)) > _ACTIVE_TTL_SECONDS:
             prior["stage"] = "EXPIRED"
 
+        direction = str(prior.get("direction") or direction)
         chart = row.get("chart") or {}
         ts = chart.get("timestamps") or []
         highs, lows = chart.get("high") or [], chart.get("low") or []
