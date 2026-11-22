@@ -1,12 +1,19 @@
 """M15-only crossover radar; discovery evidence only, never an execution authority."""
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 from ggp_market_data import closed_ohlcv_frame, require_m15_timeframe
+from triple_ema_vwap import detect_triple_confluence
+
+try:
+    TRIPLE_CROSS_WINDOW_CANDLES = max(1, min(12, int(os.getenv("M15_TRIPLE_CROSS_WINDOW_CANDLES", "4"))))
+except (TypeError, ValueError):
+    TRIPLE_CROSS_WINDOW_CANDLES = 4
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -89,6 +96,17 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         vwap = _finite(vwap_series.iloc[-1]) if vwap_series is not None and len(vwap_series) else None
     except Exception:
         vwap = None
+    # Wilder-style ADX/DI context is diagnostic only; it never grants entry.
+    up_move = closed["high"].diff()
+    down_move = -closed["low"].diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    atr_wilder = true_range.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    di_plus_s = 100.0 * plus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean() / atr_wilder.replace(0, np.nan)
+    di_minus_s = 100.0 * minus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean() / atr_wilder.replace(0, np.nan)
+    dx = 100.0 * (di_plus_s - di_minus_s).abs() / (di_plus_s + di_minus_s).replace(0, np.nan)
+    adx_s = dx.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    adx_value, di_plus_value, di_minus_value = map(_finite, (adx_s.iloc[-1], di_plus_s.iloc[-1], di_minus_s.iloc[-1]))
     gap = float(ema9.iloc[-1] - ema15.iloc[-1])
     gap_prev = float(ema9.iloc[-2] - ema15.iloc[-2])
     gap_before = float(ema9.iloc[-3] - ema15.iloc[-3])
@@ -146,6 +164,17 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     close_position = (float(candle["close"] - candle["low"]) / candle_range) if candle_range > 0 else None
     displacement_atr = abs(float(candle["close"] - candle["open"])) / atr if atr > 0 else None
     price_extension_atr = abs(float(price) - float(e9)) / atr if atr > 0 else None
+    triple = detect_triple_confluence(
+        closed["timestamp"].tolist(), close.tolist(), ema9.tolist(), ema15.tolist(),
+        vwap_series.tolist() if vwap_series is not None else [np.nan] * len(closed),
+        window_candles=TRIPLE_CROSS_WINDOW_CANDLES, direction=confirmed_side, atr=atr, adx=adx_value,
+        di_plus=di_plus_value, di_minus=di_minus_value,
+    ) if vwap_series is not None else {"status": "INVALID", "direction": "UNKNOWN",
+        "event_id": None, "window_candles": TRIPLE_CROSS_WINDOW_CANDLES, "reasons": ["session_vwap_unavailable"],
+        "entry_authorization": False}
+    pullback_prices = [x for x in (e9, e15, vwap) if x is not None]
+    pullback_zone = ({"low": min(pullback_prices) - 0.2 * atr,
+                      "high": max(pullback_prices) + 0.2 * atr} if pullback_prices else None)
     if status == "CROSS_CONFIRMED" and direction:
         if direction == "BUY" and price <= e9:
             state, reason = "INVALIDATED", "CLOSED_PRICE_LOST_EMA9_AFTER_BULLISH_CROSS"
@@ -169,6 +198,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         "ema9": [float(x) for x in ema9.iloc[chart_start:]],
         "ema15": [float(x) for x in ema15.iloc[chart_start:]],
         "session_vwap": [(_finite(x)) for x in (vwap_series.iloc[chart_start:] if vwap_series is not None else [None] * (len(closed) - chart_start))],
+        "volume": [float(x) for x in closed["volume"].iloc[chart_start:]],
         "cross_marker": {"timestamp": signal_timestamp, "direction": confirmed_side, "status": "CONFIRMED"} if confirmed_side else None,
         "intrabar_marker": {"timestamp": int(last_raw["timestamp"]), "direction": intrabar_side, "status": "PROVISIONAL"} if intrabar_side else None,
     }
@@ -177,6 +207,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         "current_price": latest_price, "closed_price": price,
         "ema9": e9, "ema15": e15, "session_vwap": vwap,
         "ema_distance": gap, "ema_distance_atr": round(gap_atr, 5), "atr": atr,
+        "adx": adx_value, "di_plus": di_plus_value, "di_minus": di_minus_value,
+        "pullback_zone": pullback_zone, "triple_confluence": triple,
         "volume_ratio": round(volume_ratio, 5) if volume_ratio is not None else None,
         "crossover_status": status, "opportunity_state": state,
         "entry_readiness": "NOT_AUTHORIZED_BY_RADAR",
@@ -196,6 +228,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
             "price_extension_atr": round(price_extension_atr, 5) if price_extension_atr is not None else None,
             "volume_ratio": round(volume_ratio, 5) if volume_ratio is not None else None,
             "vwap_available": vwap is not None,
+            "triple_confluence_status": triple.get("status"),
+            "triple_confluence_reasons": triple.get("reasons", []),
             "source": "CLOSED_M15_PLUS_PROVISIONAL_CURRENT_CANDLE",
         },
         "chart": chart,

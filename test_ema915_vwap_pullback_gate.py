@@ -17,12 +17,16 @@ def _frame(side="BUY", count=80):
             "volume": 1000.0,
         })
     frame = pd.DataFrame(rows)
+    frame.loc[count - 25:count - 2, "volume"] = 800.0
+    frame.loc[count - 1, "volume"] = 1200.0
     if side == "BUY":
-        # Cross occurs four bars before the last closed candle.
-        frame.loc[count - 2, ["open", "high", "low", "close"]] = [100.15, 100.30, 99.95, 100.10]
+        # Pullback, rejection and breakout occupy distinct closed candles.
+        frame.loc[count - 3, ["open", "high", "low", "close"]] = [100.05, 100.22, 99.90, 100.05]
+        frame.loc[count - 2, ["open", "high", "low", "close"]] = [100.00, 100.30, 99.85, 100.22]
         frame.loc[count - 1, ["open", "high", "low", "close"]] = [100.15, 100.60, 100.05, 100.50]
     else:
-        frame.loc[count - 2, ["open", "high", "low", "close"]] = [99.85, 100.20, 99.70, 100.05]
+        frame.loc[count - 3, ["open", "high", "low", "close"]] = [99.95, 100.10, 99.78, 99.95]
+        frame.loc[count - 2, ["open", "high", "low", "close"]] = [100.00, 100.15, 99.70, 99.80]
         frame.loc[count - 1, ["open", "high", "low", "close"]] = [99.85, 100.00, 99.40, 99.50]
     return frame
 
@@ -126,8 +130,9 @@ def test_vwap_direction_must_agree_with_ema_cross(monkeypatch):
 
 def test_pullback_is_mandatory_after_cross(monkeypatch):
     frame = _frame("BUY")
-    frame.loc[len(frame) - 2, ["open", "high", "low", "close"]] = [100.50, 100.60, 100.45, 100.50]
-    frame.loc[len(frame) - 1, ["open", "high", "low", "close"]] = [100.50, 100.80, 100.45, 100.70]
+    frame.loc[len(frame) - 3, ["open", "high", "low", "close"]] = [100.60, 100.80, 100.55, 100.70]
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close"]] = [100.60, 100.80, 100.55, 100.70]
+    frame.loc[len(frame) - 1, ["open", "high", "low", "close"]] = [100.60, 100.90, 100.55, 100.80]
     result = _run(monkeypatch, "BUY", frame=frame)
     assert result["ready"] is False
     assert result["reason"] == "waiting_for_ema_band_pullback"
@@ -144,7 +149,38 @@ def test_rejection_and_continuation_break_are_separate_requirements(monkeypatch)
 
 def test_continuation_without_rejection_wick_is_not_authorized(monkeypatch):
     frame = _frame("BUY")
-    frame.loc[len(frame) - 1, ["open", "high", "low", "close"]] = [100.10, 100.60, 100.10, 100.50]
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close"]] = [100.05, 100.30, 100.05, 100.25]
+    result = _run(monkeypatch, "BUY", frame=frame)
+    assert result["ready"] is False
+    assert result["reason"] == "waiting_for_directional_rejection"
+
+
+
+
+
+def test_quality_breakout_is_blocked_when_volume_does_not_expand(monkeypatch):
+    frame = _frame("BUY")
+    frame.loc[len(frame) - 1, "volume"] = 800.0
+    result = _run(monkeypatch, "BUY", frame=frame)
+    assert result["ready"] is False
+    assert result["reason"] == "continuation_break_volume_not_confirmed"
+    assert result["pullback_timestamp"] is not None
+    assert result["rejection_timestamp"] is not None
+
+
+def test_wick_only_breakout_is_classified_false_and_blocked(monkeypatch):
+    frame = _frame("BUY")
+    frame.loc[len(frame) - 1, ["open", "high", "low", "close"]] = [100.35, 100.62, 100.05, 100.25]
+    result = _run(monkeypatch, "BUY", frame=frame)
+    assert result["ready"] is False
+    assert result["reason"] == "false_breakout_close_back_inside"
+    assert result["false_breakout"] is True
+    assert result["continuation_break"] is False
+
+
+def test_same_candle_cannot_be_rejection_and_breakout(monkeypatch):
+    frame = _frame("BUY")
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close"]] = [100.20, 100.35, 100.10, 100.18]
     result = _run(monkeypatch, "BUY", frame=frame)
     assert result["ready"] is False
     assert result["reason"] == "waiting_for_directional_rejection"

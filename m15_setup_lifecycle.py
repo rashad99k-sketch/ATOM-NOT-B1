@@ -15,6 +15,11 @@ _LOCK = threading.RLock()
 _ACTIVE: Dict[str, Dict[str, Any]] = {}
 _ACTIVE_TTL_SECONDS = 6 * 60 * 60
 _TERMINAL_STAGES = {"EXPIRED", "INVALIDATED", "COMPLETED", "ENTRY_WINDOW_MISSED"}
+_BREAKOUT_MIN_VOLUME_RATIO = 1.15
+_BREAKOUT_MIN_BODY_RATIO = 0.55
+_BREAKOUT_MIN_CLOSE_POSITION = 0.72
+_BREAKOUT_MIN_DISPLACEMENT_ATR = 0.35
+_BREAKOUT_MAX_EXTENSION_ATR = 1.50
 _STORE = None
 _STORE_READY = False
 _PERSIST_OK = False
@@ -90,6 +95,12 @@ def _new_setup(symbol, direction, now_ms, stage, cross_timestamp_ms=None):
         "pullback_timestamp_ms": None, "pullback_hold_timestamp_ms": None,
         "rejection_timestamp_ms": None, "trigger_timestamp_ms": None,
         "rejection_high": None, "rejection_low": None, "rejection_confirmed": False,
+        "breakout_status": "WAITING_FOR_BREAKOUT", "breakout_level": None,
+        "breakout_timestamp_ms": None, "breakout_close": None,
+        "breakout_volume_ratio": None, "breakout_displacement_atr": None,
+        "breakout_extension_atr": None, "breakout_body_ratio": None,
+        "false_breakout_count": 0, "last_breakout_attempt_timestamp_ms": None,
+        "failed_breakout_timestamp_ms": None,
         "cycles_seen": 0, "last_cycle_id": None,
     }
 
@@ -105,6 +116,16 @@ def _public_row(row, prior, mode, reason):
         "lifecycle_retest_timestamp_ms": prior.get("rejection_timestamp_ms"),
         "lifecycle_trigger_timestamp_ms": prior.get("trigger_timestamp_ms"),
         "lifecycle_rejection_confirmed": bool(prior.get("rejection_confirmed")),
+        "lifecycle_breakout_status": prior.get("breakout_status", "WAITING_FOR_BREAKOUT"),
+        "lifecycle_breakout_level": prior.get("breakout_level"),
+        "lifecycle_breakout_timestamp_ms": prior.get("breakout_timestamp_ms"),
+        "lifecycle_breakout_close": prior.get("breakout_close"),
+        "lifecycle_breakout_volume_ratio": prior.get("breakout_volume_ratio"),
+        "lifecycle_breakout_displacement_atr": prior.get("breakout_displacement_atr"),
+        "lifecycle_breakout_extension_atr": prior.get("breakout_extension_atr"),
+        "lifecycle_false_breakout_count": int(prior.get("false_breakout_count", 0)),
+        "lifecycle_failed_breakout_timestamp_ms": prior.get("failed_breakout_timestamp_ms"),
+        "lifecycle_breakout_confirmed": prior.get("breakout_status") == "SUCCESSFUL_BREAKOUT",
         "strategy_mode": mode, "strategy_mode_reason": reason,
         "lifecycle_event_id": prior.get("event_id"),
         "lifecycle_persisted": bool(_PERSIST_OK), "lifecycle_cycles_seen": int(prior.get("cycles_seen", 0)),
@@ -241,13 +262,31 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
         # Missing data does not invalidate a setup, but cannot advance its lifecycle.
         if status != "DATA_UNAVAILABLE":
             chart = row.get("chart") if isinstance(row.get("chart"), dict) else {}
-            names = ("timestamps", "high", "low", "open", "close", "ema9", "ema15")
+            names = ("timestamps", "high", "low", "open", "close", "ema9", "ema15", "volume", "session_vwap")
             arrays = [chart.get(name) or [] for name in names]
-            size = min((len(values) for values in arrays), default=0)
+            size = min((len(values) for values in arrays[:7]), default=0)
             candles = []
+            candle_context = {}
             if size:
-                ts, highs, lows, opens, closes, e9s, e15s = [values[-size:] for values in arrays]
+                ts, highs, lows, opens, closes, e9s, e15s = [values[-size:] for values in arrays[:7]]
+                volumes = list(arrays[7][-size:]) if len(arrays[7]) >= size else [None] * size
+                vwaps = list(arrays[8][-size:]) if len(arrays[8]) >= size else [None] * size
                 start_ts = int(prior.get("cross_timestamp_ms") or prior.get("first_seen_ms") or 0)
+                tr_values = []
+                previous_close = None
+                for i in range(size):
+                    try:
+                        h, low, c = float(highs[i]), float(lows[i]), float(closes[i])
+                        tr = max(h - low, abs(h - previous_close), abs(low - previous_close)) if previous_close is not None else h - low
+                        tr_values.append(max(0.0, tr))
+                        previous_close = c
+                    except (TypeError, ValueError, OverflowError):
+                        tr_values.append(0.0)
+                atr_values = []
+                atr_value = None
+                for tr in tr_values:
+                    atr_value = tr if atr_value is None else ((13.0 * atr_value + tr) / 14.0)
+                    atr_values.append(atr_value)
                 for i in range(size):
                     try:
                         stamp = int(ts[i])
@@ -255,7 +294,26 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
                         if stamp <= start_ts or min(o, c, h, low, e9, e15) <= 0 or h < low:
                             continue
                         candles.append((stamp, o, c, h, low, e9, e15))
-                    except (TypeError, ValueError, OverflowError):
+                        span = max(0.0, h - low)
+                        body_ratio = abs(c - o) / span if span > 0 else 0.0
+                        close_position = (c - low) / span if span > 0 else 0.5
+                        atr_i = _number(atr_values[i])
+                        volume_i = _number(volumes[i])
+                        prior_volumes = [_number(v) for v in volumes[max(0, i - 20):i]]
+                        prior_volumes = [v for v in prior_volumes if v is not None and v >= 0]
+                        baseline = sum(prior_volumes) / len(prior_volumes) if len(prior_volumes) >= 10 else None
+                        volume_ratio_i = volume_i / baseline if volume_i is not None and baseline and baseline > 0 else None
+                        vwap_i = _number(vwaps[i])
+                        candle_context[stamp] = {
+                            "atr": atr_i,
+                            "volume_ratio": volume_ratio_i,
+                            "body_ratio": body_ratio,
+                            "close_position": close_position,
+                            "displacement_atr": abs(c - o) / atr_i if atr_i and atr_i > 0 else None,
+                            "extension_atr": abs(c - e9) / atr_i if atr_i and atr_i > 0 else None,
+                            "vwap_aligned": bool(vwap_i is not None and ((prior.get("direction") == "BUY" and c > vwap_i) or (prior.get("direction") == "SELL" and c < vwap_i))),
+                        }
+                    except (TypeError, ValueError, OverflowError, IndexError):
                         continue
                 candles.sort(key=lambda item: item[0])
 
@@ -304,21 +362,84 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
                         break
 
             rejection_ts = int(prior.get("rejection_timestamp_ms") or 0)
-            if prior.get("stage") == "REJECTION_CONFIRMED" and rejection_ts:
-                rejection_high = _number(prior.get("rejection_high"))
-                rejection_low = _number(prior.get("rejection_low"))
+            direction = str(prior.get("direction") or "UNKNOWN").upper()
+            breakout_level = _number(prior.get("breakout_level"))
+            if breakout_level is None:
+                breakout_level = _number(prior.get("rejection_high" if direction == "BUY" else "rejection_low"))
+                if breakout_level is not None:
+                    prior["breakout_level"] = breakout_level
+
+            # A subsequent closed candle through the level invalidates a previously
+            # confirmed breakout. Intrabar wicks alone never change lifecycle authority.
+            if prior.get("breakout_status") == "SUCCESSFUL_BREAKOUT":
+                success_ts = int(prior.get("breakout_timestamp_ms") or 0)
                 for stamp, o, c, h, low, e9, e15 in candles:
-                    if stamp <= rejection_ts:
+                    if stamp <= success_ts:
                         continue
-                    triggered = (
-                        prior.get("direction") == "BUY" and c > o and rejection_high is not None and c > rejection_high
-                    ) or (
-                        prior.get("direction") == "SELL" and c < o and rejection_low is not None and c < rejection_low
-                    )
-                    if triggered:
-                        prior["stage"] = "TRIGGER_CONFIRMED"
-                        prior["trigger_timestamp_ms"] = stamp
+                    failed = (direction == "BUY" and c <= breakout_level) or (direction == "SELL" and c >= breakout_level)
+                    if failed:
+                        prior["stage"] = "INVALIDATED"
+                        prior["breakout_status"] = "FAILED_BREAKOUT"
+                        prior["failed_breakout_timestamp_ms"] = stamp
+                        prior["terminal_reason"] = "CLOSED_CANDLE_RETURNED_THROUGH_CONFIRMED_BREAKOUT_LEVEL"
                         break
+
+            # Breakout attempts are evaluated only from candles after the closed
+            # rejection candle. A wick through the level without a close beyond it
+            # is a false breakout, not a valid continuation trigger.
+            if (prior.get("stage") in {"REJECTION_CONFIRMED", "FALSE_BREAKOUT", "BREAKOUT_UNCONFIRMED"}
+                    and rejection_ts and breakout_level is not None):
+                last_attempt = int(prior.get("last_breakout_attempt_timestamp_ms") or rejection_ts)
+                for stamp, o, c, h, low, e9, e15 in candles:
+                    if stamp <= last_attempt:
+                        continue
+                    wick_broke = (direction == "BUY" and h > breakout_level) or (direction == "SELL" and low < breakout_level)
+                    close_broke = (direction == "BUY" and c > breakout_level) or (direction == "SELL" and c < breakout_level)
+                    if not wick_broke:
+                        continue
+                    ctx = candle_context.get(stamp, {})
+                    if not close_broke:
+                        prior["stage"] = "FALSE_BREAKOUT"
+                        prior["breakout_status"] = "FALSE_BREAKOUT"
+                        prior["false_breakout_count"] = int(prior.get("false_breakout_count", 0)) + 1
+                        prior["last_breakout_attempt_timestamp_ms"] = stamp
+                        prior["false_breakout_timestamp_ms"] = stamp
+                        last_attempt = stamp
+                        continue
+
+                    volume_ratio_i = _number(ctx.get("volume_ratio"))
+                    body_ratio_i = _number(ctx.get("body_ratio"))
+                    close_position_i = _number(ctx.get("close_position"))
+                    displacement_i = _number(ctx.get("displacement_atr"))
+                    extension_i = _number(ctx.get("extension_atr"))
+                    directional_close = (close_position_i is not None and
+                        ((direction == "BUY" and close_position_i >= _BREAKOUT_MIN_CLOSE_POSITION)
+                         or (direction == "SELL" and close_position_i <= 1.0 - _BREAKOUT_MIN_CLOSE_POSITION)))
+                    quality_ok = bool(
+                        volume_ratio_i is not None and volume_ratio_i >= _BREAKOUT_MIN_VOLUME_RATIO
+                        and body_ratio_i is not None and body_ratio_i >= _BREAKOUT_MIN_BODY_RATIO
+                        and directional_close
+                        and displacement_i is not None and displacement_i >= _BREAKOUT_MIN_DISPLACEMENT_ATR
+                        and extension_i is not None and extension_i <= _BREAKOUT_MAX_EXTENSION_ATR
+                        and ctx.get("vwap_aligned") is True
+                    )
+                    prior["last_breakout_attempt_timestamp_ms"] = stamp
+                    prior["breakout_close"] = c
+                    prior["breakout_volume_ratio"] = volume_ratio_i
+                    prior["breakout_displacement_atr"] = displacement_i
+                    prior["breakout_extension_atr"] = extension_i
+                    prior["breakout_body_ratio"] = body_ratio_i
+                    if quality_ok:
+                        prior["stage"] = "TRIGGER_CONFIRMED"
+                        prior["breakout_status"] = "SUCCESSFUL_BREAKOUT"
+                        prior["breakout_timestamp_ms"] = stamp
+                        prior["trigger_timestamp_ms"] = stamp
+                        prior["breakout_quality"] = "CLOSED_BREAKOUT_VOLUME_DISPLACEMENT_VWAP_NO_CHASE"
+                        break
+                    prior["stage"] = "BREAKOUT_UNCONFIRMED"
+                    prior["breakout_status"] = "BREAKOUT_UNCONFIRMED"
+                    prior["breakout_unconfirmed_timestamp_ms"] = stamp
+                    last_attempt = stamp
 
         gap = _number(row.get("ema_distance_atr"))
         volume = _number(row.get("volume_ratio"))
@@ -346,7 +467,15 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
         if expansion_candle and prior.get("stage") in {"WAITING_FOR_PULLBACK", "WAITING_FOR_CANDLE_CLOSE"}:
             prior["stage"] = "MOMENTUM_EXPANSION_CANDIDATE"
             prior["momentum_timestamp_ms"] = int(row.get("signal_timestamp_ms") or now_ms)
-        if gap is None or volume is None:
+        if prior.get("breakout_status") == "FAILED_BREAKOUT":
+            mode, reason = "NO_TRADE_OR_WAIT", "FAILED_BREAKOUT_CLOSED_BACK_THROUGH_LEVEL"
+        elif prior.get("breakout_status") == "SUCCESSFUL_BREAKOUT":
+            mode, reason = "BREAKOUT_CONFIRMED_DISCOVERY_ONLY", "CLOSED_BREAKOUT_VOLUME_DISPLACEMENT_VWAP_NO_CHASE"
+        elif prior.get("breakout_status") == "FALSE_BREAKOUT":
+            mode, reason = "WAIT_FOR_EVIDENCE", "WICK_BREAKOUT_REJECTED_BY_CLOSED_CANDLE"
+        elif prior.get("breakout_status") == "BREAKOUT_UNCONFIRMED":
+            mode, reason = "WAIT_FOR_EVIDENCE", "BREAKOUT_CLOSE_LACKS_REQUIRED_QUALITY"
+        elif gap is None or volume is None:
             mode, reason = "WAIT_FOR_EVIDENCE", "REGIME_OR_VOLUME_UNAVAILABLE"
         elif expansion_candle:
             mode, reason = "MOMENTUM_CANDIDATE", "DISPLACEMENT_VOLUME_CANDLE_CLOSE_AND_VWAP_CONFIRMED"

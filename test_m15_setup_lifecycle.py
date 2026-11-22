@@ -54,7 +54,9 @@ def test_pre_cross_transitions_to_waiting_for_candle_close_without_authorizing_e
     assert result["entry_authorization"] is False
 
 
-def test_pullback_retest_and_trigger_require_distinct_later_closed_candles():
+def test_pullback_retest_requires_distinct_later_closed_candles_but_missing_breakout_evidence_stays_unconfirmed():
+    # The old fixture omitted both volume history and VWAP. It can prove the
+    # pullback/rejection chronology, but cannot prove a high-quality breakout.
     chart = {
         "timestamps": [BASE_TS, BASE_TS + 900_000, BASE_TS + 1_800_000, BASE_TS + 2_700_000, BASE_TS + 3_600_000],
         "open": [101.0, 100.8, 100.35, 100.4, 100.9],
@@ -67,10 +69,61 @@ def test_pullback_retest_and_trigger_require_distinct_later_closed_candles():
         _row(direction="BUY", chart=chart, closed_price=101.2),
         now_ms=BASE_TS + 3_700_000, cycle_id=1,
     )
-    assert result["lifecycle_stage"] == "TRIGGER_CONFIRMED"
+    assert result["lifecycle_stage"] == "BREAKOUT_UNCONFIRMED"
+    assert result["lifecycle_breakout_status"] == "BREAKOUT_UNCONFIRMED"
     assert result["lifecycle_pullback_timestamp_ms"] == BASE_TS + 900_000
     assert result["lifecycle_pullback_hold_timestamp_ms"] == BASE_TS + 1_800_000
     assert result["lifecycle_retest_timestamp_ms"] == BASE_TS + 2_700_000
+    assert result["lifecycle_trigger_timestamp_ms"] is None
+    assert result["entry_authorization"] is False
+
+
+def test_quality_breakout_requires_closed_volume_vwap_and_no_chase_evidence():
+    # Twenty pre-cross candles provide a real rolling volume baseline. The
+    # breakout candle must close through the rejection high with volume,
+    # directional body/close, ATR displacement, VWAP alignment and no-chase.
+    history_ts = [BASE_TS - 20 * 900_000 + i * 900_000 for i in range(20)]
+    chart = {
+        "timestamps": history_ts + [BASE_TS],
+        "open": [100.0] * 21,
+        "high": [100.3] * 21,
+        "low": [99.7] * 21,
+        "close": [100.1] * 21,
+        "ema9": [100.0] * 20 + [100.2],
+        "ema15": [100.1] * 20 + [100.4],
+        "volume": [100.0] * 21,
+        "session_vwap": [100.0] * 21,
+    }
+    later = [
+        # pullback touch, then a separate hold candle
+        (100.8, 101.0, 100.1, 100.3, 100.5, 100.6, 100.0, 100.0),
+        (100.4, 100.8, 100.2, 100.55, 100.5, 100.6, 100.0, 100.0),
+        # rejection candle; its high becomes the breakout level
+        (100.55, 101.05, 100.25, 100.85, 100.6, 100.7, 100.0, 100.0),
+        # valid close above rejection high with sufficient volume and controlled extension
+        (100.9, 101.45, 100.8, 101.35, 100.65, 100.75, 150.0, 100.0),
+    ]
+    for i, (open_, high, low, close, ema9, ema15, volume, vwap) in enumerate(later, start=1):
+        chart["timestamps"].append(BASE_TS + i * 900_000)
+        chart["open"].append(open_)
+        chart["high"].append(high)
+        chart["low"].append(low)
+        chart["close"].append(close)
+        chart["ema9"].append(ema9)
+        chart["ema15"].append(ema15)
+        chart["volume"].append(volume)
+        chart["session_vwap"].append(vwap)
+
+    result = lifecycle.advance_m15_setup_lifecycle(
+        _row(direction="BUY", chart=chart, closed_price=101.35, session_vwap=100.0),
+        now_ms=BASE_TS + 4_500_000, cycle_id=1,
+    )
+    assert result["lifecycle_stage"] == "TRIGGER_CONFIRMED"
+    assert result["lifecycle_breakout_status"] == "SUCCESSFUL_BREAKOUT"
+    assert result["lifecycle_breakout_timestamp_ms"] == BASE_TS + 3_600_000
+    assert result["lifecycle_breakout_volume_ratio"] >= 1.15
+    assert result["lifecycle_breakout_displacement_atr"] >= 0.35
+    assert result["lifecycle_breakout_extension_atr"] <= 1.5
     assert result["lifecycle_trigger_timestamp_ms"] == BASE_TS + 3_600_000
     assert result["entry_authorization"] is False
 

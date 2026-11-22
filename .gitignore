@@ -11,6 +11,11 @@ data/*.sqlite3-shm
 *.sqlite3-wal
 *.sqlite3-shm
 
+# Runtime crossover snapshots can grow; retain only the checked-in synthetic example.
+data/crossover_snapshots/*
+!data/crossover_snapshots/examples/
+!data/crossover_snapshots/examples/**
+
 # Python
 __pycache__/
 *.pyc

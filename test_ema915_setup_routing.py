@@ -89,6 +89,7 @@ def test_continuation_keeps_pullback_rejection_and_breakout_requirements():
         "waiting_for_ema_band_pullback",
         "waiting_for_directional_rejection",
         "waiting_for_continuation_break",
+        "false_breakout_close_back_inside",
     }
 
 
