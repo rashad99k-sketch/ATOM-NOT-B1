@@ -640,13 +640,13 @@ def safe_api_call(func, *args, **kwargs):
             raise
     for attempt in range(3):
         try:
-        # GovernedExchange owns the single global request budget.
+            # GovernedExchange owns the single global request budget.
             return func(*args, **kwargs)
         except Exception as e:
             error_text = str(e).lower()
             rate_limited = (
                 "rate limit" in error_text or "100410" in error_text
-                or "429" in error_text or "418" in error_text
+                or "429" in error_text or "418" in error_text or "cooldown" in error_text
             )
             if rate_limited:
                 status_418 = "418" in error_text
@@ -663,7 +663,7 @@ def safe_api_call(func, *args, **kwargs):
                 })
                 try:
                     log_execution(
-                        f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; retry in {wait}s",
+                        f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; governor cooldown={wait}s",
                         "WARN", debounce_key=f"api_backoff_{getattr(func, '__name__', 'call')}", debounce_sec=30
                     )
                 except Exception:
