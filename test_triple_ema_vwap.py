@@ -65,7 +65,11 @@ def test_snapshot_queue_is_bounded_and_reference_path_is_deterministic(monkeypat
     assert crossover_snapshots.snapshot_status()["dropped"] == 1
 
 
-def test_local_snapshot_uses_supplied_chart_only_and_creates_png(tmp_path):
+def test_local_snapshot_uses_supplied_chart_only_and_creates_png(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        crossover_snapshots, "_STATUS",
+        {"queued": 0, "generated": 0, "dropped": 0, "last_error": None},
+    )
     payload = {
         "symbol": "BTC/USDT", "timeframe": "15m", "direction": "BUY",
         "last_update_ms": 1000, "snapshot_stage": "crossover",
@@ -77,9 +81,10 @@ def test_local_snapshot_uses_supplied_chart_only_and_creates_png(tmp_path):
             "timestamps": [1000, 2000, 3000], "open": [1, 2, 3],
             "high": [2, 3, 4], "low": [0.5, 1.5, 2.5], "close": [1.5, 2.5, 3.5],
             "ema9": [1, 2, 3], "ema15": [1.1, 1.9, 2.9],
-            "session_vwap": [1.2, 2.0, 2.8], "volume": [10, 12, 14],
+            "session_vwap": [1.2, 2.0, 2.8], "volume": [12, 14],
         },
     }
     path = render_snapshot(payload, str(tmp_path))
     assert path and Path(path).is_file()
     assert Path(path).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert crossover_snapshots.snapshot_status()["last_error"] is None
