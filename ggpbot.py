@@ -909,6 +909,7 @@ API_GOVERNOR = BingXAPIGovernor(
     max_concurrent=_env_int_range("BINGX_MAX_CONCURRENT_REQUESTS", 4, 1, 8),
     cooldown_429=_env_float_range("BINGX_429_COOLDOWN_SECONDS", 30.0, 5.0, 300.0),
     cooldown_418=_env_float_range("BINGX_418_COOLDOWN_SECONDS", 60.0, 30.0, 900.0),
+    state_path=os.path.join(ENV_DIR, "data", "bingx_api_governor_state.json"),
 )
 # All scanners, dashboard readers, reconciliation and TradeExecutionService
 # share this proxy. Keep the raw CCXT object private to this initialization.
