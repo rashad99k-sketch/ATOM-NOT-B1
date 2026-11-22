@@ -173,6 +173,37 @@ class BingXAPIGovernor:
             # Persistence is best-effort; in-memory cooldown remains enforced.
             return
 
+    @staticmethod
+    def classify_request(path: Any, api: Any = "public", http_method: Any = "GET") -> Tuple[str, int]:
+        """Classify the actual CCXT HTTP request, not just its high-level caller."""
+        route = str(path or "").lower().replace("_", "").replace("-", "")
+        api_name = str(api or "").lower()
+        verb = str(http_method or "GET").upper()
+        if "kline" in route or "candles" in route:
+            return "market_kline", 2
+        if "leverage" in route:
+            return "leverage_write", 0
+        if "order" in route:
+            if verb in {"POST", "PUT", "DELETE"}:
+                return "order_write", 0
+            return "account_orders", 0
+        if "position" in route or "positions" in route:
+            return "account_positions", 0
+        if "balance" in route or ("account" in route and "asset" in route):
+            return "account_balance", 1
+        if "mytrades" in route or "usertrades" in route or "transaction" in route:
+            return "account_trades", 1
+        if any(token in route for token in ("ticker", "depth", "book", "funding", "premiumindex", "markprice", "exchangeinfo", "quote")):
+            return "market_data", 2
+        if "private" in api_name:
+            return "generic", 1
+        return "generic", 3
+
+    def call_endpoint(self, path: Any, api: Any, http_method: Any,
+                      function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        category, priority = self.classify_request(path, api, http_method)
+        return self._call_classified(category, priority, f"request:{path}", function, *args, **kwargs)
+
     def _cooldown_remaining(self, category: str, now: float) -> float:
         return max(
             self._global_cooldown_until - now,
@@ -266,6 +297,10 @@ class BingXAPIGovernor:
 
     def call(self, method_name: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         category, priority = self.classify(method_name)
+        return self._call_classified(category, priority, method_name, function, *args, **kwargs)
+
+    def _call_classified(self, category: str, priority: int, method_name: str,
+                         function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         started = self._enter(category, priority)
         error = None
         try:
@@ -303,22 +338,29 @@ class BingXAPIGovernor:
 
 
 class GovernedExchange:
-    """Transparent CCXT proxy; all network-facing methods use one governor."""
+    """Transparent CCXT proxy that governs every actual HTTP request.
 
-    _NETWORK_PREFIXES = (
-        "fetch_", "create_", "cancel_", "set_", "edit_", "swapv2",
-        "contractv1", "spotv1", "private",
-    )
-    _LOCAL_METHODS = {
-        "market", "markets_by_id", "safe_currency_code", "safe_symbol",
-        "amount_to_precision", "price_to_precision", "cost_to_precision",
-        "currency_to_precision", "parse8601", "iso8601", "milliseconds",
-        "nonce", "decimal_to_precision",
-    }
+    Patching CCXT's request boundary is deliberate: one high-level call such as
+    load_markets may issue multiple HTTP requests, and each must consume budget.
+    """
 
     def __init__(self, exchange: Any, governor: BingXAPIGovernor):
         self._exchange = exchange
         self._governor = governor
+        original_request = getattr(exchange, "request", None)
+        if not callable(original_request):
+            raise TypeError("CCXT exchange must expose a callable request() boundary")
+
+        def governed_request(path, api="public", method="GET", params=None,
+                             headers=None, body=None, config=None):
+            return self._governor.call_endpoint(
+                path, api, method, original_request,
+                path, api, method, params if params is not None else {},
+                headers, body, config if config is not None else {},
+            )
+
+        governed_request.__name__ = "request"
+        exchange.request = governed_request
 
     @property
     def raw_exchange(self) -> Any:
@@ -330,18 +372,7 @@ class GovernedExchange:
         return self._governor
 
     def __getattr__(self, name: str) -> Any:
-        value = getattr(self._exchange, name)
-        lowered = name.lower()
-        if (name in self._LOCAL_METHODS or not callable(value)
-                or not (lowered.startswith(self._NETWORK_PREFIXES) or lowered == "load_markets")):
-            return value
-
-        @functools.wraps(value)
-        def governed(*args: Any, **kwargs: Any) -> Any:
-            return self._governor.call(name, value, *args, **kwargs)
-
-        governed.__name__ = name
-        return governed
+        return getattr(self._exchange, name)
 
     def __repr__(self) -> str:
         return f"GovernedExchange({self._exchange!r})"
