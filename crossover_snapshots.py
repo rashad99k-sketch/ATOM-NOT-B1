@@ -27,6 +27,8 @@ def snapshot_relative_path(payload: Dict[str, Any]) -> str:
 
 def render_snapshot(payload: Dict[str, Any], root: Optional[str] = None) -> Optional[str]:
     """Render OHLC, EMA9/15, Session VWAP and volume from the provided cached chart."""
+    plt = None
+    fig = None
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
@@ -41,7 +43,11 @@ def render_snapshot(payload: Dict[str, Any], root: Optional[str] = None) -> Opti
         ts = chart["timestamps"][-size:]
         op, hi, lo, cl = [chart[k][-size:] for k in ("open", "high", "low", "close")]
         e9, e15, vwap = [chart[k][-size:] for k in ("ema9", "ema15", "session_vwap")]
-        volume = (chart.get("volume") or [0.0] * size)[-size:]
+        raw_volume = list(chart.get("volume") or [])
+        # Keep the volume series aligned with price even when an upstream cached
+        # chart contains a shorter optional volume array.
+        volume = raw_volume[-size:] if len(raw_volume) >= size else ([0.0] * (size - len(raw_volume)) + raw_volume)
+        volume = [float(value) if value is not None else 0.0 for value in volume]
         dates = [datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc) for value in ts]
         fig, (ax, av) = plt.subplots(2, 1, figsize=(11, 6), sharex=True, gridspec_kw={"height_ratios": [4, 1]})
         fig.patch.set_facecolor("#0b1220")
@@ -80,12 +86,17 @@ def render_snapshot(payload: Dict[str, Any], root: Optional[str] = None) -> Opti
         folder.mkdir(parents=True, exist_ok=True)
         target = base / relative
         fig.savefig(target, dpi=110, facecolor=fig.get_facecolor())
-        plt.close(fig)
         return str(target.resolve())
     except Exception as exc:
         with _LOCK:
             _STATUS["last_error"] = f"{type(exc).__name__}:{str(exc)[:180]}"
         return None
+    finally:
+        if plt is not None and fig is not None:
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
 
 
 def _run_worker() -> None:
