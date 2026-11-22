@@ -361,17 +361,28 @@ def validate_ema915_vwap_pullback_entry_gate(
     timeframe_seconds: int = 900, now_ms: Optional[int] = None,
     cross_lookback_candles: int = 8, pullback_lookback_candles: int = 5,
     current_price: Optional[float] = None, max_extension_atr: float = 1.5,
+    setup_mode: str = "CONTINUATION",
+    institutional_evidence: Optional[List[str]] = None,
+    institutional_event_id: Optional[str] = None,
+    institutional_origin_timestamp: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Primary entry authority: fresh EMA9/EMA15 cross, VWAP alignment,
-    a subsequent pullback into the EMA band, then a closed-candle continuation
-    break. Pure validation only; it never places or manages orders.
+    """Validate a closed-candle EMA9/EMA15 cross with setup-specific confirmation.
+
+    Reversals require a later institutional sweep timestamp plus reclaim, closed
+    MSS, post-MSS retest and directional-trigger evidence. Continuations retain
+    the EMA-band pullback, directional rejection and breakout sequence. VWAP,
+    freshness and no-chase checks apply to both paths. This function never trades.
     """
     direction = str(side or "").strip().upper()
     expected = "BULLISH" if direction == "BUY" else "BEARISH"
     cross_window = max(2, min(12, int(cross_lookback_candles)))
     pullback_window = max(2, min(8, int(pullback_lookback_candles)))
+    normalized_setup_mode = str(setup_mode or "CONTINUATION").strip().upper()
+    is_reversal_setup = "REVERSAL" in normalized_setup_mode
     result: Dict[str, Any] = {
-        "ready": False, "side": direction, "trigger": "EMA9_EMA15_VWAP_PULLBACK",
+        "ready": False, "side": direction,
+        "trigger": "EMA9_EMA15_VWAP_REVERSAL" if is_reversal_setup else "EMA9_EMA15_VWAP_PULLBACK",
+        "setup_mode": normalized_setup_mode,
         "reason": "invalid_side", "ema9": None, "ema15": None, "vwap": None,
         "cross_direction": None, "cross_timestamp": None, "pullback_timestamp": None,
         "signal_candle_timestamp": None, "signal_candle_id": None,
@@ -498,9 +509,9 @@ def validate_ema915_vwap_pullback_entry_gate(
         result.update({"reason": "waiting_for_post_cross_pullback",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
-    if cross_age_bars > pullback_window + 1:
-        result.update({"reason": "pullback_window_expired",
-                       "cross_direction": cross_direction, "cross_timestamp": cross_ts})
+    max_cross_age = cross_window if is_reversal_setup else pullback_window + 1
+    if cross_age_bars > max_cross_age:
+        result["reason"] = "cross_window_expired" if is_reversal_setup else "pullback_window_expired"
         return result
 
     e9_now, e15_now, vwap_now = float(ema9.iloc[-1]), float(ema15.iloc[-1]), float(vwap.iloc[-1])
@@ -514,7 +525,95 @@ def validate_ema915_vwap_pullback_entry_gate(
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
-    # A pullback must occur AFTER the cross and BEFORE the continuation candle.
+    # Reversal setups use the crossover as the analysis trigger, then rely on
+    # the existing institutional authority's sweep -> reclaim -> MSS -> retest
+    # evidence. They must not be forced through the continuation-only EMA-band
+    # pullback and prior-candle breakout sequence below.
+    if is_reversal_setup:
+        try:
+            sweep_timestamp = int(institutional_origin_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            result["reason"] = "institutional_sweep_timestamp_unavailable"
+            return result
+        # Enforce the requested chronology: EMA9/EMA15 cross first, then a
+        # later liquidity event, then the institutional engine's later MSS,
+        # post-MSS retest and directional trigger.
+        if sweep_timestamp <= cross_ts or sweep_timestamp > latest_ts:
+            result.update({
+                "reason": "institutional_sweep_not_after_ema915_cross",
+                "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+                "institutional_origin_timestamp": sweep_timestamp,
+                "latest_closed_timestamp": latest_ts,
+            })
+            return result
+        evidence = [str(item).strip().lower() for item in (institutional_evidence or [])]
+        setup_name = str(setup_mode or "").strip().upper()
+        if "FAILED_AUCTION" in setup_name:
+            required_evidence = (
+                "failed_auction", "outside_acceptance_failed", "reclaim",
+                "closed_mss", "directional_trigger",
+            )
+        else:
+            required_evidence = (
+                "prior_liquidity_pool", "sweep", "reclaim",
+                "closed_mss", "directional_trigger",
+            )
+        evidence_complete = (
+            all(any(token in item for item in evidence) for token in required_evidence)
+            and any(item.startswith("post_mss_retest:") for item in evidence)
+        )
+        if not evidence_complete:
+            result.update({
+                "reason": "institutional_reversal_evidence_incomplete",
+                "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+                "cross_age_bars": cross_age_bars,
+                "required_evidence": list(required_evidence) + ["post_mss_retest:"],
+            })
+            return result
+
+        live_price = float(current_price) if current_price is not None else latest_close
+        if not np.isfinite(live_price) or live_price <= 0:
+            result["reason"] = "invalid_current_price"
+            return result
+        if (direction == "BUY" and live_price <= vwap_now) or (direction == "SELL" and live_price >= vwap_now):
+            result["reason"] = "live_price_lost_vwap_alignment"
+            return result
+        extension = (live_price - e9_now) if direction == "BUY" else (e9_now - live_price)
+        if extension < -0.10 * atr or extension > max(0.1, float(max_extension_atr)) * atr:
+            result.update({
+                "reason": "entry_window_missed_no_chase",
+                "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+                "extension_atr": extension / atr,
+            })
+            return result
+
+        signal_ts = latest_ts
+        event_fragment = str(institutional_event_id or "").strip() or f"{cross_ts}:{signal_ts}"
+        result.update({
+            "ready": True,
+            "reason": "ema915_cross_vwap_liquidity_sweep_reclaim_mss_retest_confirmed",
+            "authorization_state": "EMA915_INSTITUTIONAL_REVERSAL_VALID",
+            "setup_mode": setup_name,
+            "cross_direction": cross_direction,
+            "cross_timestamp": cross_ts,
+            "cross_age_bars": cross_age_bars,
+            "signal_candle_timestamp": signal_ts,
+            "signal_candle_id": f"{direction}:EMA915_REVERSAL:{cross_ts}:SWEEP:{sweep_timestamp}:EVENT:{event_fragment}:TRIGGER:{signal_ts}",
+            "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
+            "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
+            "institutional_origin_timestamp": sweep_timestamp,
+            "liquidity_sweep_confirmed": True,
+            "reclaim_confirmed": True,
+            "mss_confirmed": True,
+            "post_mss_retest_confirmed": True,
+            "institutional_evidence": list(institutional_evidence or []),
+            "entry_price": live_price,
+            "extension_atr": extension / atr,
+        })
+        return result
+
+    # Continuation setups retain the full EMA-band pullback, rejection and
+    # closed-candle continuation-break requirements below.
     pullback_idx = None
     scan_start = max(cross_idx + 1, len(closed) - 1 - pullback_window)
     for idx in range(scan_start, len(closed) - 1):

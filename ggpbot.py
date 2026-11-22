@@ -91,6 +91,7 @@ from ggp_institutional_bridge import build_liquidity_pools
 from roro_confluence import classify_liquidity as _classify_live_liquidity
 from location_authority import validate_location_zone
 from m15_crossover_radar import evaluate_m15_radar
+from m15_setup_lifecycle import advance_m15_setup_lifecycle, list_active_m15_setups, clear_m15_setup_memory
 
 # Observational only: all routine trade-management decisions still come from
 # TradeManagementBoard / LiveTradeManager. This bounded feed never sends orders.
@@ -6148,6 +6149,10 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
             )),
             now_ms=int(time.time() * 1000), cross_lookback_candles=8,
             pullback_lookback_candles=5, current_price=price,
+            setup_mode=str(management_state.get("entry_gate_setup_mode") or "CONTINUATION"),
+            institutional_evidence=list(management_state.get("entry_gate_evidence") or []),
+            institutional_event_id=str(management_state.get("entry_gate_event_id") or ""),
+            institutional_origin_timestamp=management_state.get("entry_gate_origin_timestamp"),
         )
         if (not final_gate.get("ready")
                 or final_gate.get("signal_candle_id") != gate_snapshot.get("signal_candle_id")):
@@ -6581,8 +6586,14 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         return False
     trade_id = uuid.uuid4().hex
     institutional_entry_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT") or {}
-    # Final execution-boundary gate: no institutional, sniper, RF or legacy
-    # setup can bypass the mandatory EMA9-to-session-VWAP closed-candle cross.
+    # The closed-candle EMA9/EMA15 cross starts the setup analysis. Reversal
+    # setups must then prove sweep/reclaim/MSS/retest through institutional
+    # evidence; continuation setups retain the stricter EMA-band pullback path.
+    gate_setup_type = str(institutional_entry_ctx.get("setup_type") or "").strip().upper()
+    gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
+    gate_evidence = list(institutional_entry_ctx.get("evidence") or [])
+    gate_event_id = str(institutional_entry_ctx.get("event_id") or "")
+    gate_origin_timestamp = institutional_entry_ctx.get("origin_timestamp")
     gate_frame = institutional_entry_ctx.get("closed_candle_frame")
     gate_frame_source = institutional_entry_ctx.get("closed_candle_source") or "ENTRY_CONTEXT"
     gate_tf = str(institutional_entry_ctx.get("candle_timeframe") or INTERVAL)
@@ -6596,7 +6607,11 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
             now_ms=int(time.time() * 1000), cross_lookback_candles=8,
             pullback_lookback_candles=5, current_price=float(price),
+            setup_mode=gate_setup_mode, institutional_evidence=gate_evidence,
+            institutional_event_id=gate_event_id,
+            institutional_origin_timestamp=gate_origin_timestamp,
         )
+        gate_result["setup_mode"] = gate_setup_mode
         gate_result["frame_source"] = gate_frame_source
     except Exception as gate_exc:
         gate_result = {"ready": False, "reason": f"gate_error:{type(gate_exc).__name__}"}
@@ -7070,6 +7085,10 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "trail_activated": False, "be_done": False,
         "entry_gate_snapshot": dict(gate_result),
         "entry_gate_timeframe": gate_tf,
+        "entry_gate_setup_mode": gate_setup_mode,
+        "entry_gate_evidence": list(gate_evidence),
+        "entry_gate_event_id": gate_event_id,
+        "entry_gate_origin_timestamp": gate_origin_timestamp,
     }
     if daily_loss_cooldown_active():
         log_execution(f"[ENTRY_BLOCKED] cooldown activated during validation; order not submitted for {symbol}", "WARN")
@@ -7304,6 +7323,8 @@ def rf_proximity_score(rf, adx_val, vol_ok, rsi_val, atr_pct):
     return float(score)
 
 def scan_market_rf(top_n=40, symbols=None):
+    if _discovery_paused():
+        return []
     symbols = list(symbols) if symbols is not None else get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
     symbols = symbols[:SCANNER_UNIVERSE_MAX]
     if not symbols:
@@ -7312,7 +7333,7 @@ def scan_market_rf(top_n=40, symbols=None):
     results = []
     for sym in symbols[:150]:
         # Yield immediately if an entry opens while this background scan is active.
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         try:
             # Shared 150-bar cache key lets Scanner V2 and RF scanner reuse one OHLCV snapshot.
@@ -7368,12 +7389,14 @@ def scan_market_rf(top_n=40, symbols=None):
 
 # ========== SMART SCANNER v2 ==========
 def smart_scanner_v2(symbols=None):
+    if _discovery_paused():
+        return [], []
     symbols = list(symbols) if symbols is not None else get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
     symbols = symbols[:SCANNER_UNIVERSE_MAX]
     buy_candidates = []
     sell_candidates = []
     for sym in symbols:
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         try:
             df = _get_scanner_frame(sym, 150)
@@ -8972,9 +8995,13 @@ def radar_score(df):
     return score
 
 def rebuild_radar_watchlist():
+    if _discovery_paused():
+        return
     symbols = get_usdt_perp_symbols()
     candidates = []
     for sym in symbols[:150]:
+        if _discovery_paused():
+            break
         try:
             df = get_ohlcv_safe(sym, 100)
             if df is None or not validate_dataframe(df, 80) or not fast_market_filter(df):
@@ -8990,9 +9017,13 @@ def rebuild_radar_watchlist():
     log_execution(f"Radar rebuilt: {len(candidates)} candidates, top5: {[c['symbol'] for c in MEMORY['radar_top5']]}", "INFO")
 
 def refresh_radar_watchlist():
+    if _discovery_paused():
+        return
     wl = MEMORY.get("radar_watchlist", [])
     updated = []
     for entry in wl:
+        if _discovery_paused():
+            break
         sym = entry["symbol"]
         try:
             df = get_ohlcv_safe(sym, 100)
@@ -9009,6 +9040,8 @@ def refresh_radar_watchlist():
     log_execution(f"Radar refreshed: {len(updated)} symbols remain in watchlist", "INFO")
 
 def radar_entry_scan():
+    if _discovery_paused():
+        return
     if not MEMORY.get("radar_top5"):
         return
     now = time.time()
@@ -10326,6 +10359,9 @@ def build_rf_dashboard(candidates=None):
     return dashboard
 
 def run_scanner_v2(symbols=None):
+    if _discovery_paused():
+        MEMORY["scanner_v2_state"] = "PAUSED_FOR_POSITION"
+        return False
     try:
         buy, sell = smart_scanner_v2(symbols=symbols)
         MEMORY["scanner_v2_buy"] = buy
@@ -10728,6 +10764,9 @@ def _sniper_v2_structural_stop(side, zone, atr_value, roro_stop):
 
 def sniper_engine_v2():
     """One bounded scan cycle; execution stays on the unified GGP/RORO path."""
+    if _discovery_paused():
+        SNIPER_V2_METRICS["state"] = "PAUSED_FOR_POSITION_OR_RECOVERY"
+        return False
     if daily_loss_cooldown_active():
         SNIPER_V2_METRICS["state"] = "PAUSED_DAILY_LOSS_COOLDOWN"
         return False
@@ -10749,7 +10788,7 @@ def sniper_engine_v2():
             "zones_waiting": 0, "zones_ready": 0, "last_error": None,
         })
         for symbol in symbols:
-            if STATE.get("open") or TRADE_STATE.get("in_position"):
+            if _discovery_paused():
                 break
             raw_frame = _get_scanner_frame(symbol, 150)
             if raw_frame is None or not validate_dataframe(raw_frame, 80):
@@ -10833,6 +10872,7 @@ def sniper_engine_v2():
             tp2 = price * (1.0 - tp2_move if side == "SELL" else 1.0 + tp2_move)
             _INSTITUTIONAL_ENTRY_CONTEXT = {
                 "setup_type": setup, "event_id": event_id, "evidence": evidence,
+                "origin_timestamp": authority.get("origin_timestamp"),
                 "structural_stop": structural_stop, "pullback_type": "SNIPER_ZONE_RETEST",
                 "trading_mode": "SNIPER",
                 "entry_behavior": "RETEST",
@@ -10906,6 +10946,8 @@ def _run_sniper_scan_if_due():
 
 # ========== SCANNER CONTEXT MODE – update institutional flow without a trade ==========
 def update_institutional_flow_scanner():
+    if _discovery_paused():
+        return False
     try:
         df = get_ohlcv_safe(DEFAULT_SYMBOL, 100)
         if df is None or not validate_dataframe(df, 80):
@@ -10945,12 +10987,12 @@ def live_institutional_updater():
     while True:
         try:
             # Do not run during open trade to avoid duplicate API calls and thread contention
-            if STATE.get("open"):
+            if _discovery_paused():
                 time.sleep(5)
                 continue
             symbol = DEFAULT_SYMBOL
             df = get_ohlcv_safe(symbol, 100)
-            if df is not None and validate_dataframe(df, 80):
+            if not _discovery_paused() and df is not None and validate_dataframe(df, 80):
                 smart = SmartMoneyEngine.analyze_smart_money(df)
                 mom = MomentumFlowEngine.analyze_momentum_flow(df)
                 with _TRADE_LOCK:
@@ -10996,6 +11038,7 @@ MEMORY = {
     "ema9_vwap_proximity_scanner_meta": {"state": "IDLE", "role": "RANKING_ONLY"},
     "radar_watchlist": [],
     "m15_crossover_radar": [],
+    "m15_setup_watchlist": [],
     "radar_top5": [],
     "log_debounce": {},
     "watchlist": {},
@@ -11126,11 +11169,11 @@ def main_loop_sniper():
                 time.sleep(1)
                 continue
 
-            if now - last_flow_update > 60:
+            if not _discovery_paused() and now - last_flow_update > 60:
                 update_institutional_flow_scanner()
                 last_flow_update = now
 
-            if not (TRADE_STATE["in_position"] or STATE["open"]):
+            if not _discovery_paused():
                 sync_position_state()
                 if STATE.get("open"):
                     continue
@@ -11536,9 +11579,21 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
         result["gpp_engine_diagnostics"] = {"status": "PARTIAL", "reason": f"{type(exc).__name__}:{str(exc)[:120]}"}
     return result
 
+def _discovery_paused():
+    """Fail-closed gate for discovery only; trade management and exchange sync remain live."""
+    return bool(
+        STATE.get("open")
+        or TRADE_STATE.get("in_position")
+        or globals().get("RECOVERY_BLOCK_ENTRIES", False)
+        or MEMORY.get("position_status") in {"UNKNOWN", "MULTIPLE_OPEN"}
+    )
+
+
 _last_unified_watchlist_refresh = 0.0
 def refresh_unified_institutional_watchlist(force=False):
     global _last_unified_watchlist_refresh
+    if _discovery_paused():
+        return MEMORY.setdefault("watchlist", {})
     now = time.time()
     if not force and now - _last_unified_watchlist_refresh < INSTITUTIONAL_WATCHLIST_REFRESH_SECONDS:
         return MEMORY.setdefault("watchlist", {})
@@ -11548,8 +11603,16 @@ def refresh_unified_institutional_watchlist(force=False):
             MEMORY, _integration_fetch_frame,
             max_items=INSTITUTIONAL_WATCHLIST_MAX_SYMBOLS,
             batch_size=INSTITUTIONAL_WATCHLIST_BATCH_SIZE,
-            enrich=_enrich_with_existing_gpp_engines
+            enrich=_enrich_with_existing_gpp_engines,
+            should_stop=_discovery_paused
         )
+        # A cooperative yield is not a successful refresh. Keep stale Watchlist
+        # candidates from authorizing an entry if the position closes immediately after the yield.
+        if (MEMORY.get("unified_watchlist_stop_reason") == "DISCOVERY_PAUSED"
+                or _discovery_paused()):
+            MEMORY["_unified_watchlist_refresh_ok"] = False
+            log_execution("[INTEGRATION] unified Watchlist refresh yielded to trade/recovery lifecycle", "INFO")
+            return result
         proximity_meta = MEMORY.setdefault("ema9_vwap_proximity_scanner_meta", {})
         proximity_meta.update({
             "observed_this_batch": int(MEMORY.get("_proximity_batch_updates", 0)),
@@ -11609,7 +11672,7 @@ RECOVERY_BLOCK_ENTRIES = False
 def smart_opportunity_selection():
     """Unified Watchlist -> institutional engines -> one existing GGP execution path."""
     global _INSTITUTIONAL_ENTRY_CONTEXT
-    if daily_loss_cooldown_active():
+    if _discovery_paused() or daily_loss_cooldown_active():
         return False
     refresh_unified_institutional_watchlist()
     # Never authorize a new entry from a stale Watchlist after an integration failure.
@@ -11617,7 +11680,7 @@ def smart_opportunity_selection():
     if MEMORY.get("_unified_watchlist_refresh_ok") is False:
         log_execution("[ENTRY_GUARD] unified Watchlist refresh failed; stale candidates cannot authorize entries", "WARN")
         return False
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         return False
     if globals().get("RECOVERY_BLOCK_ENTRIES", False) or MEMORY.get("position_status") == "UNKNOWN":
         log_execution("[ENTRY_GUARD] Exchange recovery is unresolved; new entries blocked", "WARN")
@@ -11680,6 +11743,8 @@ def smart_opportunity_selection():
     ready.sort(key=_location_first_rank, reverse=True)
     # Bound entry revalidation work per loop; the rotating Watchlist analyzes the rest.
     for canonical, item in ready[:8]:
+        if _discovery_paused():
+            return False
         try:
             side = str(item.get("side", "")).upper()
             if side not in ("BUY", "SELL"):
@@ -11705,6 +11770,8 @@ def smart_opportunity_selection():
                 side_hints=item.get("side_hints") or [side],
             )
             fresh.update(_enrich_with_existing_gpp_engines(closed_df, fresh.get("side"), fresh))
+            if _discovery_paused():
+                return False
             item.update(fresh)
             item["source"] = item.get("source") or "unified_watchlist"
             if item.get("decision_state") != "ENTRY_READY":
@@ -11804,6 +11871,7 @@ def smart_opportunity_selection():
                 "setup_type": setup,
                 "event_id": item.get("event_id"),
                 "evidence": evidence,
+                "origin_timestamp": item.get("origin_timestamp"),
                 "structural_stop": float(sl),
                 "trading_mode": str(item.get("trading_mode") or market_intelligence.get("mode") or "UNCLASSIFIED"),
                 "entry_behavior": str(item.get("entry_behavior") or market_intelligence.get("entry_behavior") or "WAIT_FOR_STRUCTURE"),
@@ -11827,6 +11895,10 @@ def smart_opportunity_selection():
                 "closed_candle_timestamp": int(closed_df["timestamp"].iloc[-1]),
             }
             reason = "UNIFIED_INSTITUTIONAL_ENTRY | " + " | ".join(evidence)
+            # Recheck immediately before entering the single execution gateway.
+            if _discovery_paused():
+                _INSTITUTIONAL_ENTRY_CONTEXT = None
+                return False
             try:
                 is_strong = is_strong_candidate(item)
                 sizing_class = "SNIPER" if is_strong else "TREND"
@@ -11863,6 +11935,9 @@ _SCANNER_TASK_LOCKS = {}
 _SCANNER_TASK_STATUS = {}
 
 def dispatch_scanner_task(name, function, *args, **kwargs):
+    if _discovery_paused():
+        MEMORY.setdefault("scanner_tasks", {})[name] = {"state": "PAUSED_FOR_POSITION", "last_completed": time.time()}
+        return False
     with _SCANNER_TASKS_LOCK:
         lock = _SCANNER_TASK_LOCKS.setdefault(name, threading.Lock())
         if not lock.acquire(blocking=False):
@@ -11872,11 +11947,14 @@ def dispatch_scanner_task(name, function, *args, **kwargs):
 
     def runner():
         try:
-            if STATE.get("open") or TRADE_STATE.get("in_position"):
+            if _discovery_paused():
                 _SCANNER_TASK_STATUS[name] = {"state": "PAUSED_FOR_POSITION", "last_completed": time.time()}
             else:
                 function(*args, **kwargs)
-                _SCANNER_TASK_STATUS[name] = {"state": "IDLE", "last_completed": time.time(), "last_error": None}
+                _SCANNER_TASK_STATUS[name] = {
+                    "state": "PAUSED_FOR_POSITION" if _discovery_paused() else "IDLE",
+                    "last_completed": time.time(), "last_error": None
+                }
         except Exception as exc:
             _SCANNER_TASK_STATUS[name] = {
                 "state": "ERROR", "last_completed": time.time(),
@@ -11901,10 +11979,17 @@ def run_global_discovery_scanner():
     meta = MEMORY.setdefault("discovery_scanner", {})
     meta.update({"state": "RUNNING", "last_started": started, "symbols_scanned": 0,
                  "universe_limit": SCANNER_UNIVERSE_MAX})
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
         return
     symbols = get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
+    # Revisit retained setups even when the rotating discovery universe changes.
+    try:
+        retained = [item.get("symbol") for item in list_active_m15_setups()
+                    if isinstance(item, dict) and item.get("symbol")]
+        symbols = list(dict.fromkeys(list(symbols) + retained[:80]))
+    except Exception as retain_exc:
+        log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
     with _SCANNER_FRAME_CACHE_LOCK:
         _SCANNER_FRAME_CACHE.clear()
     if not symbols:
@@ -11912,8 +11997,11 @@ def run_global_discovery_scanner():
         return
 
     # V2 first fetches market data into the bounded per-symbol cache.
+    if _discovery_paused():
+        meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
+        return
     run_scanner_v2(symbols=symbols)
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
 
@@ -11926,7 +12014,7 @@ def run_global_discovery_scanner():
         top_n=min(40, SCANNER_UNIVERSE_MAX),
         min_score=4.5,
         max_symbols=SCANNER_UNIVERSE_MAX,
-        should_stop=lambda: bool(STATE.get("open") or TRADE_STATE.get("in_position")),
+        should_stop=_discovery_paused,
     )
     MEMORY["professional_scan_candidates"] = [
         {**row, "score": round(float(row.get("score", 0) or 0) * 10.0, 2),
@@ -11942,11 +12030,14 @@ def run_global_discovery_scanner():
         "duration_seconds": round(time.time() - pro_started, 2),
         "role": "DISCOVERY_ONLY_BOTH_SIDES_REANALYZED",
     }
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time(),
                      "professional_candidates": len(pro_candidates)})
         return
 
+    if _discovery_paused():
+        meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
+        return
     rf_candidates = scan_market_rf(top_n=40, symbols=symbols)
     MEMORY["rf_watchlist"] = rf_candidates[:30]
     MEMORY["last_scan"] = time.time()
@@ -11968,7 +12059,7 @@ def run_global_discovery_scanner():
         if symbol and symbol not in top_symbols:
             top_symbols.append(symbol)
     for symbol in top_symbols[:30]:
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         frame = _get_scanner_frame(symbol, 150)
         if frame is None or not validate_dataframe(frame, 80):
@@ -11989,6 +12080,8 @@ def run_global_discovery_scanner():
     crossover_scan_time_ms = int(time.time() * 1000)
     state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
     for symbol in symbols:
+        if _discovery_paused():
+            break
         raw_frame = _get_scanner_raw_frame(symbol, 150)
         try:
             row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
@@ -12000,7 +12093,34 @@ def run_global_discovery_scanner():
             continue
         if row.get("crossover_status") == "DATA_UNAVAILABLE":
             continue
+        row = advance_m15_setup_lifecycle(row, now_ms=crossover_scan_time_ms, cycle_id=crossover_scan_time_ms)
         prior = MEMORY.get("watchlist", {}).get(roro_canonical_symbol(symbol), {})
+        if not row.get("lifecycle_active") and row.get("lifecycle_stage") in {"INVALIDATED", "EXPIRED", "COMPLETED"}:
+            terminal_key = roro_canonical_symbol(symbol)
+            terminal_item = MEMORY.get("watchlist", {}).get(terminal_key)
+            if isinstance(terminal_item, dict):
+                terminal_item.pop("m15_setup", None)
+        if row.get("lifecycle_active"):
+            # Discovery evidence is stored in the canonical Watchlist, never as entry authorization.
+            canonical_key = roro_canonical_symbol(symbol)
+            watch_item = MEMORY.setdefault("watchlist", {}).setdefault(canonical_key, {"symbol": canonical_key})
+            watch_item["m15_setup"] = {
+                "stage": row.get("lifecycle_stage"),
+                "direction": row.get("lifecycle_direction"),
+                "strategy_mode": row.get("strategy_mode"),
+                "reason": row.get("strategy_mode_reason"),
+                "cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+                "pullback_timestamp_ms": row.get("lifecycle_pullback_timestamp_ms"),
+                "retest_timestamp_ms": row.get("lifecycle_retest_timestamp_ms"),
+                "cycles_seen": row.get("lifecycle_cycles_seen", 1),
+                "minimum_retention_met": row.get("lifecycle_minimum_retention_met", False),
+                "updated_at_ms": crossover_scan_time_ms,
+                "source": "M15_CROSSOVER_RADAR_DISCOVERY_ONLY",
+            }
+            watch_item["last_update"] = crossover_scan_time_ms / 1000.0
+            if watch_item.get("decision_state") not in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}:
+                watch_item["decision_state"] = "WAITING_FOR_CONFIRMATION"
+                watch_item["decision_reason"] = "M15_SETUP_TRACKED_AWAITING_PULLBACK_OR_RETEST"
         if isinstance(prior, dict):
             prior_age = crossover_scan_time_ms / 1000.0 - safe_float(
                 prior.get("last_update", prior.get("last_updated", 0)), 0.0
@@ -12018,8 +12138,22 @@ def run_global_discovery_scanner():
                 row["fvg"] = prior.get("fvg")
                 row["institutional_evidence_age_seconds"] = round(max(0.0, prior_age), 1)
         if (row.get("crossover_status") != "NO_ACTIVE_CROSS"
+                or row.get("lifecycle_active")
                 or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
             crossover_rows.append(row)
+    # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
+    # This is an in-memory candidate feed, not a second scanner or entry authority.
+    MEMORY["m15_setup_watchlist"] = [
+        {
+            "symbol": row.get("symbol"),
+            "side_hint": row.get("lifecycle_direction"),
+            "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
+            "m15_stage": row.get("lifecycle_stage"),
+            "source": "m15_runtime_watchlist",
+        }
+        for row in crossover_rows if row.get("lifecycle_active")
+        and row.get("lifecycle_direction") in {"BUY", "SELL"}
+    ]
     crossover_rows.sort(key=lambda item: (
         state_rank.get(str(item.get("crossover_status")), 3),
         item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
@@ -12297,12 +12431,30 @@ def _fetch_external_close_diagnostic(symbol, side, entry_time=None, stop_order_i
                                    bot_close_order_ids=bot_close_order_ids or [])
 
 
+def _reset_m15_discovery_after_verified_flat():
+    """Clear only runtime M15 discovery state after BingX FLAT is authoritative."""
+    try:
+        clear_m15_setup_memory()
+        MEMORY["m15_setup_watchlist"] = []
+        for item in MEMORY.setdefault("watchlist", {}).values():
+            if isinstance(item, dict):
+                item.pop("m15_setup", None)
+        log_execution("[DISCOVERY_LIFECYCLE] verified FLAT; runtime M15 candidates cleared for fresh universe scan", "INFO")
+        return True
+    except Exception as exc:
+        log_execution(f"[DISCOVERY_LIFECYCLE] runtime reset failed: {type(exc).__name__}: {exc}", "WARN")
+        return False
+
+
 def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     """Clear exposure only after BingX FLAT; classify close cause from exchange evidence."""
     global RECOVERY_BLOCK_ENTRIES, _ACTIVE_TRADE
     if not STATE.get("open"):
         MEMORY["position_status"] = "FLAT"
         MEMORY["current_position"] = None
+        MEMORY["recovery_status"] = "RECONCILED_FLAT"
+        RECOVERY_BLOCK_ENTRIES = False
+        _reset_m15_discovery_after_verified_flat()
         return True
     trade_id = STATE.get("trade_id")
     side = STATE.get("side")
@@ -12399,6 +12551,8 @@ def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     MEMORY["current_position"] = None
     MEMORY["recovery_status"] = "RECONCILED_FLAT"
     RECOVERY_BLOCK_ENTRIES = False
+    # A new discovery cycle starts only after this exchange-confirmed FLAT.
+    _reset_m15_discovery_after_verified_flat()
     clear_position_dashboard()
     STATE["last_close_verified"] = True
     STATE["last_close_exchange_flat_confirmed"] = True
