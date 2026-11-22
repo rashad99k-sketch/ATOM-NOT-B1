@@ -193,7 +193,7 @@ class BingXAPIGovernor:
             return "account_balance", 1
         if "mytrades" in route or "usertrades" in route or "transaction" in route:
             return "account_trades", 1
-        if any(token in route for token in ("ticker", "depth", "book", "funding", "premiumindex", "markprice", "exchangeinfo", "quote")):
+        if any(token in route for token in ("ticker", "depth", "book", "funding", "premiumindex", "markprice", "exchangeinfo", "contracts", "quote")):
             return "market_data", 2
         if "private" in api_name:
             return "generic", 1
