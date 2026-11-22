@@ -33,7 +33,7 @@ def _new_setup(symbol, direction, now_ms, stage, cross_timestamp_ms=None):
         "symbol": symbol, "direction": direction if direction in {"BUY", "SELL"} else "UNKNOWN",
         "cross_timestamp_ms": cross_timestamp_ms, "stage": stage,
         "first_seen_ms": now_ms, "last_seen_ms": now_ms,
-        "pullback_timestamp_ms": None, "zone_hold_timestamp_ms": None,
+        "pullback_timestamp_ms": None, "pullback_hold_timestamp_ms": None,
         "rejection_timestamp_ms": None, "trigger_timestamp_ms": None,
         "rejection_high": None, "rejection_low": None, "rejection_confirmed": False,
         "cycles_seen": 0, "last_cycle_id": None,
@@ -47,7 +47,7 @@ def _public_row(row, prior, mode, reason):
         "lifecycle_direction": prior.get("direction"),
         "lifecycle_cross_timestamp_ms": prior.get("cross_timestamp_ms"),
         "lifecycle_pullback_timestamp_ms": prior.get("pullback_timestamp_ms"),
-        "lifecycle_zone_hold_timestamp_ms": prior.get("zone_hold_timestamp_ms"),
+        "lifecycle_pullback_hold_timestamp_ms": prior.get("pullback_hold_timestamp_ms"),
         "lifecycle_retest_timestamp_ms": prior.get("rejection_timestamp_ms"),
         "lifecycle_trigger_timestamp_ms": prior.get("trigger_timestamp_ms"),
         "lifecycle_rejection_confirmed": bool(prior.get("rejection_confirmed")),
@@ -210,12 +210,12 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms=None, cycle_id=No
                     band_low, band_high = sorted((e9, e15))
                     held = c >= band_low if prior.get("direction") == "BUY" else c <= band_high
                     if held:
-                        prior["stage"] = "ZONE_HOLD_CONFIRMED"
-                        prior["zone_hold_timestamp_ms"] = stamp
+                        prior["stage"] = "PULLBACK_HOLD_CONFIRMED"
+                        prior["pullback_hold_timestamp_ms"] = stamp
                         break
 
-            hold_ts = int(prior.get("zone_hold_timestamp_ms") or 0)
-            if prior.get("stage") == "ZONE_HOLD_CONFIRMED" and hold_ts:
+            hold_ts = int(prior.get("pullback_hold_timestamp_ms") or 0)
+            if prior.get("stage") == "PULLBACK_HOLD_CONFIRMED" and hold_ts:
                 for index, candle in enumerate(candles):
                     stamp, o, c, h, low, e9, e15 = candle
                     if stamp <= hold_ts:
