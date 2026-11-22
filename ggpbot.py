@@ -11019,6 +11019,7 @@ MEMORY = {
     "ema9_vwap_proximity_scanner_meta": {"state": "IDLE", "role": "RANKING_ONLY"},
     "radar_watchlist": [],
     "m15_crossover_radar": [],
+    "m15_setup_watchlist": [],
     "radar_top5": [],
     "log_debounce": {},
     "watchlist": {},
@@ -12096,6 +12097,19 @@ def run_global_discovery_scanner():
                 or row.get("lifecycle_active")
                 or row.get("institutional_setup_state") in {"ENTRY_READY", "WAITING_FOR_RETEST", "WAITING_FOR_CONFIRMATION"}):
             crossover_rows.append(row)
+    # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
+    # This is an in-memory candidate feed, not a second scanner or entry authority.
+    MEMORY["m15_setup_watchlist"] = [
+        {
+            "symbol": row.get("symbol"),
+            "side_hint": row.get("lifecycle_direction"),
+            "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
+            "m15_stage": row.get("lifecycle_stage"),
+            "source": "m15_runtime_watchlist",
+        }
+        for row in crossover_rows if row.get("lifecycle_active")
+        and row.get("lifecycle_direction") in {"BUY", "SELL"}
+    ]
     crossover_rows.sort(key=lambda item: (
         state_rank.get(str(item.get("crossover_status")), 3),
         item.get("ema_distance_atr") if item.get("ema_distance_atr") is not None else 999.0,
@@ -12478,6 +12492,7 @@ def _clear_confirmed_flat_unlocked(symbol, reason="EXCHANGE_FLAT_CONFIRMED"):
     # A new discovery cycle starts only after this exchange-confirmed FLAT.
     try:
         clear_m15_setup_memory()
+        MEMORY["m15_setup_watchlist"] = []
         for _watch_item in MEMORY.setdefault("watchlist", {}).values():
             if isinstance(_watch_item, dict):
                 _watch_item.pop("m15_setup", None)
