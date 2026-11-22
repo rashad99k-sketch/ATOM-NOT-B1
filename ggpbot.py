@@ -567,6 +567,7 @@ _API_RATE_LOCK = threading.Lock()
 _LAST_API_RATE_LIMIT = {"ts": 0.0, "method": "", "message": ""}
 _BINGX_KLINE_COOLDOWN_UNTIL = 0.0
 _BINGX_KLINE_COOLDOWN_LOCK = threading.RLock()
+_BINGX_KLINE_REQUEST_LOCK = threading.RLock()
 
 def rate_limit(func=None):
     """Serialize API request starts, applying endpoint-specific minimum spacing."""
@@ -617,6 +618,52 @@ def safe_api_call(func, *args, **kwargs):
                 "message": f"local kline cooldown active for {remaining:.1f}s",
             })
             return None
+    # Kline calls need an atomic cooldown check + request. Without this lock,
+    # concurrent workers can all pass the cooldown check, queue behind rate_limit,
+    # and still hit BingX after the first worker receives HTTP 429/418.
+    if method_name == "fetch_ohlcv":
+        for attempt in range(3):
+            try:
+                with _BINGX_KLINE_REQUEST_LOCK:
+                    with _BINGX_KLINE_COOLDOWN_LOCK:
+                        remaining = _BINGX_KLINE_COOLDOWN_UNTIL - time.monotonic()
+                    if remaining > 0:
+                        _LAST_API_RATE_LIMIT.update({
+                            "ts": time.time(), "method": method_name,
+                            "message": f"local kline cooldown active for {remaining:.1f}s",
+                        })
+                        return None
+                    rate_limit(func)
+                    return func(*args, **kwargs)
+            except Exception as e:
+                error_text = str(e).lower()
+                rate_limited = (
+                    "rate limit" in error_text or "100410" in error_text
+                    or "429" in error_text or "418" in error_text
+                )
+                if rate_limited:
+                    status_418 = "418" in error_text
+                    wait = 60 if status_418 else 30
+                    with _BINGX_KLINE_COOLDOWN_LOCK:
+                        _BINGX_KLINE_COOLDOWN_UNTIL = max(
+                            _BINGX_KLINE_COOLDOWN_UNTIL, time.monotonic() + wait
+                        )
+                    _LAST_API_RATE_LIMIT.update({
+                        "ts": time.time(), "method": method_name,
+                        "message": str(e)[:180],
+                    })
+                    try:
+                        log_execution(
+                            f"[API_BACKOFF] {method_name} rate-limited; cooldown {wait}s; queued calls suppressed",
+                            "WARN", debounce_key="api_backoff_fetch_ohlcv", debounce_sec=30
+                        )
+                    except Exception:
+                        pass
+                    return None
+                if attempt == 2:
+                    raise
+                time.sleep(1)
+        return None
     # Order creation is non-idempotent. Never automatically retry a timed-out
     # create_order call: BingX may have accepted the first request already.
     is_order_write = getattr(func, "__name__", "") in {"create_order", "create_market_order", "create_limit_order"}
@@ -7294,8 +7341,8 @@ def _get_scanner_frame(symbol, limit=150):
 
 
 def _get_scanner_raw_frame(symbol, limit=150):
-    """Return one shared raw M15 snapshot; serialize same-symbol cache misses."""
-    key = str(symbol)
+    """Return one shared snapshot per symbol/timeframe/limit; serialize cache misses."""
+    key = (str(symbol), str(INTERVAL), int(limit))
     now = time.monotonic()
     with _SCANNER_FRAME_CACHE_LOCK:
         item = _SCANNER_FRAME_CACHE.get(key)
@@ -7319,19 +7366,44 @@ def _get_scanner_raw_frame(symbol, limit=150):
                         _SCANNER_FRAME_CACHE.pop(old_key, None)
         return frame.copy() if frame is not None else None
 
+_MARKET_UNIVERSE_CACHE = {"timestamp": 0.0, "symbols": []}
+_MARKET_UNIVERSE_CACHE_LOCK = threading.RLock()
+_MARKET_UNIVERSE_CACHE_TTL = 900.0
+
+
 def get_usdt_perp_symbols():
-    try:
-        ex.load_markets()
-        markets = ex.markets
-        symbols = []
-        for s in markets:
-            if "USDT" in s and markets[s].get('swap') and markets[s].get('active'):
-                clean = s.replace(":USDT", "")
-                symbols.append(clean)
-        return symbols[:200]
-    except Exception as e:
-        log_execution(f"Failed to load markets: {e}", "ERROR")
-        return [DEFAULT_SYMBOL]
+    """Return the cached active USDT swap universe; load CCXT markets only when absent."""
+    now = time.monotonic()
+    with _MARKET_UNIVERSE_CACHE_LOCK:
+        cached_symbols = list(_MARKET_UNIVERSE_CACHE.get("symbols") or [])
+        cached_at = float(_MARKET_UNIVERSE_CACHE.get("timestamp", 0.0) or 0.0)
+        if cached_symbols and now - cached_at < _MARKET_UNIVERSE_CACHE_TTL:
+            return cached_symbols[:200]
+        try:
+            markets = getattr(ex, "markets", None)
+            if not isinstance(markets, dict) or not markets:
+                markets = ex.load_markets()
+            if not isinstance(markets, dict):
+                markets = getattr(ex, "markets", {}) or {}
+            symbols = []
+            for symbol, market in markets.items():
+                if ("USDT" in str(symbol) and isinstance(market, dict)
+                        and market.get("swap") and market.get("active")):
+                    symbols.append(str(symbol).replace(":USDT", ""))
+            if symbols:
+                _MARKET_UNIVERSE_CACHE.update({
+                    "timestamp": time.monotonic(), "symbols": symbols[:200]
+                })
+                return symbols[:200]
+            if cached_symbols:
+                return cached_symbols[:200]
+            return [DEFAULT_SYMBOL]
+        except Exception as exc:
+            log_execution(f"Failed to load markets: {exc}", "ERROR")
+            # A temporary catalogue failure must not erase the last known universe.
+            if cached_symbols:
+                return cached_symbols[:200]
+            return [DEFAULT_SYMBOL]
 
 def rf_proximity_score(rf, adx_val, vol_ok, rsi_val, atr_pct):
     dist = abs(rf["distance"]) if rf["distance"] else 1.0
