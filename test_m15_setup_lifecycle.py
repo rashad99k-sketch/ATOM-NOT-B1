@@ -18,6 +18,7 @@ def _row(symbol="YFI/USDT", status="CROSS_CONFIRMED", direction="SELL", **overri
 
 
 def setup_function():
+    lifecycle.configure_m15_setup_store(None)
     lifecycle.clear_m15_setup_memory()
 
 
@@ -145,6 +146,8 @@ def test_m15_registry_restores_active_opportunity_from_runtime_store():
     lifecycle.configure_m15_setup_store(store)
     active = lifecycle.list_active_m15_setups(now_ms=BASE_TS + 20_000)
     assert any(item["symbol"] == "SOL/USDT" for item in active)
+    lifecycle.configure_m15_setup_store(None)
+    lifecycle.clear_m15_setup_memory()
 
 
 def test_momentum_expansion_is_classified_for_priority_analysis_not_entry_authority():
