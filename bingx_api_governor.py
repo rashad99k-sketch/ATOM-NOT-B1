@@ -20,9 +20,9 @@ class APIGovernorError(RuntimeError):
     def __init__(self, category: str, retry_after: float, reason: str = "cooldown"):
         self.category = str(category)
         self.retry_after = max(0.0, float(retry_after))
-        self.code = 429
+        self.code = 418 if "418" in str(reason) else 429
         super().__init__(
-            f"BingX API governor HTTP 429 local cooldown ({reason}): category={self.category} "
+            f"BingX API governor HTTP {self.code} local cooldown ({reason}): category={self.category} "
             f"retry_after={self.retry_after:.2f}s"
         )
 
@@ -242,7 +242,8 @@ class BingXAPIGovernor:
                     now = self._clock()
                     remaining = self._cooldown_remaining(category, now)
                     if remaining > 0:
-                        raise APIGovernorError(category, remaining)
+                        reason = "418 global ban" if self._global_cooldown_until > now else "429 endpoint cooldown"
+                        raise APIGovernorError(category, remaining, reason)
                     first = min(self._queue, key=lambda item: (item[0], item[1]))
                     interval_wait = max(0.0, self._next_allowed[category] - now)
                     if first == token and self._active < self.max_concurrent and interval_wait <= 0:
