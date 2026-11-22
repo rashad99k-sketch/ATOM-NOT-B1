@@ -612,8 +612,11 @@ def validate_ema915_vwap_pullback_entry_gate(
         })
         return result
 
-    # Continuation setups retain the full EMA-band pullback, rejection and
-    # closed-candle continuation-break requirements below.
+    # Continuation is a three-step, closed-candle sequence:
+    # (1) first EMA9/EMA15 band pullback after the cross,
+    # (2) a distinct directional rejection candle,
+    # (3) a later close beyond that rejection candle's extreme.
+    # A single candle may not satisfy both rejection and breakout.
     pullback_idx = None
     scan_start = max(cross_idx + 1, len(closed) - 1 - pullback_window)
     for idx in range(scan_start, len(closed) - 1):
@@ -629,67 +632,146 @@ def validate_ema915_vwap_pullback_entry_gate(
             held = candle_close <= band_high + 0.35 * atr
         if touched and held:
             pullback_idx = idx
+            break
     if pullback_idx is None:
         result.update({"reason": "waiting_for_ema_band_pullback",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
-    last = closed.iloc[-1]
-    previous = closed.iloc[-2]
-    last_open, last_close = float(last["open"]), float(last["close"])
-    last_high, last_low = float(last["high"]), float(last["low"])
-    previous_high, previous_low = float(previous["high"]), float(previous["low"])
-    candle_range = max(0.0, last_high - last_low)
-    lower_wick_ratio = (min(last_open, last_close) - last_low) / candle_range if candle_range > 0 else 0.0
-    upper_wick_ratio = (last_high - max(last_open, last_close)) / candle_range if candle_range > 0 else 0.0
-    if direction == "BUY":
-        rejection = last_close > last_open and last_close > e9_now and lower_wick_ratio >= 0.10
-        continuation = last_close > previous_high
-        extension = (float(current_price) if current_price is not None else last_close) - e9_now
-    else:
-        rejection = last_close < last_open and last_close < e9_now and upper_wick_ratio >= 0.10
-        continuation = last_close < previous_low
-        extension = e9_now - (float(current_price) if current_price is not None else last_close)
-    if not rejection:
+    # The newest closed candle is reserved for breakout confirmation.
+    rejection_idx = None
+    for idx in range(pullback_idx + 1, len(closed) - 1):
+        candle = closed.iloc[idx]
+        previous = closed.iloc[idx - 1]
+        candle_open = float(candle["open"])
+        candle_close = float(candle["close"])
+        candle_high = float(candle["high"])
+        candle_low = float(candle["low"])
+        candle_range = max(0.0, candle_high - candle_low)
+        lower_wick_ratio = (min(candle_open, candle_close) - candle_low) / candle_range if candle_range > 0 else 0.0
+        upper_wick_ratio = (candle_high - max(candle_open, candle_close)) / candle_range if candle_range > 0 else 0.0
+        e9_at_rejection = float(ema9.iloc[idx])
+        if direction == "BUY":
+            rejection = (candle_close > candle_open and candle_close > float(previous["close"])
+                         and candle_close > e9_at_rejection and lower_wick_ratio >= 0.10)
+        else:
+            rejection = (candle_close < candle_open and candle_close < float(previous["close"])
+                         and candle_close < e9_at_rejection and upper_wick_ratio >= 0.10)
+        if rejection:
+            rejection_idx = idx
+
+    if rejection_idx is None:
         result.update({"reason": "waiting_for_directional_rejection",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts,
                        "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx])})
         return result
+
+    rejection_candle = closed.iloc[rejection_idx]
+    rejection_high = float(rejection_candle["high"])
+    rejection_low = float(rejection_candle["low"])
+    rejection_ts = int(closed["timestamp"].iloc[rejection_idx])
+    last = closed.iloc[-1]
+    last_open, last_close = float(last["open"]), float(last["close"])
+    last_high, last_low = float(last["high"]), float(last["low"])
+    last_range = max(0.0, last_high - last_low)
+    last_body_ratio = abs(last_close - last_open) / last_range if last_range > 0 else 0.0
+    last_close_position = (last_close - last_low) / last_range if last_range > 0 else 0.5
+    breakout_level = rejection_high if direction == "BUY" else rejection_low
+    wick_broke = (last_high > breakout_level if direction == "BUY" else last_low < breakout_level)
+    continuation = (last_close > breakout_level if direction == "BUY" else last_close < breakout_level)
+    result.update({
+        "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx]),
+        "rejection_timestamp": rejection_ts,
+        "rejection_high": rejection_high,
+        "rejection_low": rejection_low,
+        "breakout_level": breakout_level,
+        "false_breakout": bool(wick_broke and not continuation),
+        "breakout_timestamp": int(last["timestamp"]),
+        "breakout_body_ratio": last_body_ratio,
+        "breakout_close_position": last_close_position,
+    })
     if not continuation:
-        result.update({"reason": "waiting_for_continuation_break",
-                       "cross_direction": cross_direction, "cross_timestamp": cross_ts,
-                       "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx])})
+        reason = "false_breakout_close_back_inside" if wick_broke else "waiting_for_continuation_break"
+        result.update({"reason": reason, "cross_direction": cross_direction,
+                       "cross_timestamp": cross_ts, "rejection_confirmed": True,
+                       "continuation_break": False})
         return result
+
+    # Only completed candles qualify; the baseline excludes the breakout bar.
+    volume_values = closed["volume"].astype(float)
+    volume_baseline = float(volume_values.iloc[-21:-1].mean()) if len(volume_values) >= 21 else 0.0
+    breakout_volume_ratio = float(volume_values.iloc[-1] / volume_baseline) if volume_baseline > 0 else None
+    breakout_displacement_atr = abs(last_close - last_open) / atr if atr > 0 else None
+    directional_close = (
+        last_close_position >= 0.72 if direction == "BUY" else last_close_position <= 0.28
+    )
+    result.update({
+        "breakout_volume_ratio": breakout_volume_ratio,
+        "breakout_displacement_atr": breakout_displacement_atr,
+        "breakout_quality_thresholds": {
+            "min_volume_ratio": 1.15, "min_body_ratio": 0.55,
+            "min_directional_close_position": 0.72,
+            "min_displacement_atr": 0.35,
+        },
+    })
+    if breakout_volume_ratio is None:
+        result["reason"] = "continuation_break_volume_unavailable"
+        return result
+    if breakout_volume_ratio < 1.15:
+        result["reason"] = "continuation_break_volume_not_confirmed"
+        return result
+    if last_body_ratio < 0.55 or not directional_close:
+        result["reason"] = "continuation_break_candle_quality_not_confirmed"
+        return result
+    if breakout_displacement_atr is None or breakout_displacement_atr < 0.35:
+        result["reason"] = "continuation_break_displacement_not_confirmed"
+        return result
+
     live_price = float(current_price) if current_price is not None else last_close
     if not np.isfinite(live_price) or live_price <= 0:
         result["reason"] = "invalid_current_price"
         return result
+    extension = (live_price - e9_now) if direction == "BUY" else (e9_now - live_price)
     if extension < -0.10 * atr or extension > max(0.1, float(max_extension_atr)) * atr:
         result.update({"reason": "entry_window_missed_no_chase",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts,
                        "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx]),
+                       "rejection_timestamp": rejection_ts,
                        "extension_atr": extension / atr})
         return result
     if (direction == "BUY" and live_price <= vwap_now) or (direction == "SELL" and live_price >= vwap_now):
-        result["reason"] = "live_price_lost_vwap_alignment"
+        result.update({"reason": "ema915_or_vwap_direction_not_aligned",
+                       "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
     signal_ts = int(last["timestamp"])
     pullback_ts = int(closed["timestamp"].iloc[pullback_idx])
     result.update({
-        "ready": True, "reason": "ema915_cross_vwap_pullback_rejection_continuation_confirmed",
+        "ready": True, "reason": "ema915_cross_vwap_pullback_rejection_then_quality_breakout_confirmed",
         "authorization_state": "EMA915_VWAP_PULLBACK_VALID",
         "cross_direction": cross_direction, "cross_timestamp": cross_ts,
         "cross_age_bars": cross_age_bars, "pullback_timestamp": pullback_ts,
+        "rejection_timestamp": rejection_ts,
         "signal_candle_timestamp": signal_ts,
-        "signal_candle_id": f"{direction}:EMA9_EMA15:{cross_ts}:PULLBACK:{pullback_ts}:BREAK:{signal_ts}",
+        "signal_candle_id": f"{direction}:EMA9_EMA15:{cross_ts}:PULLBACK:{pullback_ts}:REJECTION:{rejection_ts}:BREAK:{signal_ts}",
         "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
         "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
         "pullback_touch": True, "rejection_confirmed": True,
-        "rejection_wick_ratio": lower_wick_ratio if direction == "BUY" else upper_wick_ratio,
-        "continuation_break": True, "continuation_level": previous_high if direction == "BUY" else previous_low,
+        "rejection_wick_ratio": (
+            (min(float(rejection_candle["open"]), float(rejection_candle["close"])) - rejection_low)
+            / max(1e-12, rejection_high - rejection_low)
+            if direction == "BUY" else
+            (rejection_high - max(float(rejection_candle["open"]), float(rejection_candle["close"])))
+            / max(1e-12, rejection_high - rejection_low)
+        ),
+        "continuation_break": True, "continuation_level": breakout_level,
+        "breakout_status": "SUCCESSFUL_BREAKOUT",
+        "breakout_volume_ratio": breakout_volume_ratio,
+        "breakout_body_ratio": last_body_ratio,
+        "breakout_close_position": last_close_position,
+        "breakout_displacement_atr": breakout_displacement_atr,
         "entry_price": live_price, "extension_atr": extension / atr,
-        "signal_candle_range": candle_range,
+        "signal_candle_range": last_range,
     })
     return result
 
