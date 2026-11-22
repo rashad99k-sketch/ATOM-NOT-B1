@@ -21,6 +21,11 @@ class FakeExchange:
         self.request("quote/ticker", "public", "GET", {"symbol": symbol})
         return {"last": 123.0}
 
+    def fetch_ohlcv(self, symbol, timeframe="15m", limit=150):
+        self.request("quote/klines", "public", "GET",
+                     {"symbol": symbol, "interval": timeframe, "limit": limit})
+        return []
+
     def fetch_positions(self, symbols=None):
         self.request("user/positions", "private", "GET", {"symbols": symbols})
         return []
@@ -228,3 +233,37 @@ def test_endpoint_priority_policy_keeps_execution_and_protection_ahead_of_scans(
     assert classify("user/positions", "private", "GET") == ("account_positions", 0)
     assert classify("user/balance", "private", "GET") == ("account_balance", 1)
     assert classify("quote/klines", "public", "GET") == ("market_kline", 2)
+
+
+def test_scanner_watchlist_dashboard_and_trade_management_share_one_budget():
+    from concurrent.futures import ThreadPoolExecutor
+
+    raw = FakeExchange()
+    governor = make_governor(max_concurrent=4)
+    exchange = GovernedExchange(raw, governor)
+
+    def scanner(symbol):
+        return exchange.fetch_ohlcv(symbol, "15m", 150)
+
+    def watchlist(symbol):
+        return exchange.fetch_ohlcv(symbol, "15m", 150)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        jobs = [pool.submit(scanner, f"SCAN{i}/USDT") for i in range(10)]
+        jobs += [pool.submit(watchlist, f"WATCH{i}/USDT") for i in range(12)]
+        jobs += [
+            pool.submit(exchange.fetch_balance),       # Dashboard shared account read
+            pool.submit(exchange.fetch_positions, ["BTC/USDT"]),  # Reconciliation
+            pool.submit(exchange.swapV2PrivateGetTradeOpenOrders, {"symbol": "BTC-USDT"}),
+        ]
+        for job in jobs:
+            job.result(timeout=5)
+
+    snapshot = governor.snapshot()
+    assert snapshot["totals"]["attempts"] == 25
+    assert snapshot["categories"]["market_kline"]["attempts"] == 22
+    assert snapshot["categories"]["account_balance"]["attempts"] == 1
+    assert snapshot["categories"]["account_positions"]["attempts"] == 1
+    assert snapshot["categories"]["account_orders"]["attempts"] == 1
+    assert snapshot["active"] == 0
+    assert snapshot["queued"] == 0
