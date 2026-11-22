@@ -233,7 +233,8 @@ class BingXAPIGovernor:
         with self._condition:
             remaining = self._cooldown_remaining(category, self._clock())
             if remaining > 0:
-                raise APIGovernorError(category, remaining)
+                reason = "418 global ban" if self._global_cooldown_until > self._clock() else "429 endpoint cooldown"
+                raise APIGovernorError(category, remaining, reason)
             self._ticket += 1
             token = (int(priority), self._ticket, category)
             self._queue.append(token)
