@@ -12192,11 +12192,22 @@ def _select_m15_radar_batch(symbols, retained_symbols=None, batch_size=None):
     return list(dict.fromkeys(active_batch + universe_batch))
 
 
+def _get_m15_radar_universe():
+    """Reuse the exchange market catalogue; do not reload markets every 30-second scan."""
+    now = time.time()
+    cached = MEMORY.get("m15_radar_universe_cache")
+    if isinstance(cached, dict) and now - float(cached.get("timestamp", 0) or 0) < 900:
+        return list(cached.get("symbols") or [])
+    symbols = list(get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX])
+    MEMORY["m15_radar_universe_cache"] = {"timestamp": now, "symbols": symbols}
+    return symbols
+
+
 def run_m15_crossover_radar(symbols=None):
     """30-second bounded M15 opportunity scan; one small API-safe batch per cycle."""
     if _discovery_paused():
         return False
-    universe = list(symbols) if symbols is not None else list(get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX])
+    universe = list(symbols) if symbols is not None else _get_m15_radar_universe()
     try:
         retained = [item.get("symbol") for item in list_active_m15_setups()
                     if isinstance(item, dict) and item.get("symbol")]
