@@ -91,7 +91,7 @@ from ggp_institutional_bridge import build_liquidity_pools
 from roro_confluence import classify_liquidity as _classify_live_liquidity
 from location_authority import validate_location_zone
 from m15_crossover_radar import evaluate_m15_radar
-from m15_setup_lifecycle import advance_m15_setup_lifecycle, list_active_m15_setups
+from m15_setup_lifecycle import advance_m15_setup_lifecycle, list_active_m15_setups, clear_m15_setup_memory
 
 # Observational only: all routine trade-management decisions still come from
 # TradeManagementBoard / LiveTradeManager. This bounded feed never sends orders.
@@ -7313,7 +7313,7 @@ def scan_market_rf(top_n=40, symbols=None):
     results = []
     for sym in symbols[:150]:
         # Yield immediately if an entry opens while this background scan is active.
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         try:
             # Shared 150-bar cache key lets Scanner V2 and RF scanner reuse one OHLCV snapshot.
@@ -10327,6 +10327,9 @@ def build_rf_dashboard(candidates=None):
     return dashboard
 
 def run_scanner_v2(symbols=None):
+    if _discovery_paused():
+        MEMORY["scanner_v2_state"] = "PAUSED_FOR_POSITION"
+        return False
     try:
         buy, sell = smart_scanner_v2(symbols=symbols)
         MEMORY["scanner_v2_buy"] = buy
@@ -10907,6 +10910,8 @@ def _run_sniper_scan_if_due():
 
 # ========== SCANNER CONTEXT MODE – update institutional flow without a trade ==========
 def update_institutional_flow_scanner():
+    if _discovery_paused():
+        return False
     try:
         df = get_ohlcv_safe(DEFAULT_SYMBOL, 100)
         if df is None or not validate_dataframe(df, 80):
@@ -10946,12 +10951,12 @@ def live_institutional_updater():
     while True:
         try:
             # Do not run during open trade to avoid duplicate API calls and thread contention
-            if STATE.get("open"):
+            if _discovery_paused():
                 time.sleep(5)
                 continue
             symbol = DEFAULT_SYMBOL
             df = get_ohlcv_safe(symbol, 100)
-            if df is not None and validate_dataframe(df, 80):
+            if not _discovery_paused() and df is not None and validate_dataframe(df, 80):
                 smart = SmartMoneyEngine.analyze_smart_money(df)
                 mom = MomentumFlowEngine.analyze_momentum_flow(df)
                 with _TRADE_LOCK:
@@ -11127,11 +11132,11 @@ def main_loop_sniper():
                 time.sleep(1)
                 continue
 
-            if now - last_flow_update > 60:
+            if not _discovery_paused() and now - last_flow_update > 60:
                 update_institutional_flow_scanner()
                 last_flow_update = now
 
-            if not (TRADE_STATE["in_position"] or STATE["open"]):
+            if not _discovery_paused():
                 sync_position_state()
                 if STATE.get("open"):
                     continue
@@ -11537,9 +11542,21 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
         result["gpp_engine_diagnostics"] = {"status": "PARTIAL", "reason": f"{type(exc).__name__}:{str(exc)[:120]}"}
     return result
 
+def _discovery_paused():
+    """Fail-closed gate for discovery only; trade management and exchange sync remain live."""
+    return bool(
+        STATE.get("open")
+        or TRADE_STATE.get("in_position")
+        or globals().get("RECOVERY_BLOCK_ENTRIES", False)
+        or MEMORY.get("position_status") in {"UNKNOWN", "MULTIPLE_OPEN"}
+    )
+
+
 _last_unified_watchlist_refresh = 0.0
 def refresh_unified_institutional_watchlist(force=False):
     global _last_unified_watchlist_refresh
+    if _discovery_paused():
+        return MEMORY.setdefault("watchlist", {})
     now = time.time()
     if not force and now - _last_unified_watchlist_refresh < INSTITUTIONAL_WATCHLIST_REFRESH_SECONDS:
         return MEMORY.setdefault("watchlist", {})
@@ -11610,7 +11627,7 @@ RECOVERY_BLOCK_ENTRIES = False
 def smart_opportunity_selection():
     """Unified Watchlist -> institutional engines -> one existing GGP execution path."""
     global _INSTITUTIONAL_ENTRY_CONTEXT
-    if daily_loss_cooldown_active():
+    if _discovery_paused() or daily_loss_cooldown_active():
         return False
     refresh_unified_institutional_watchlist()
     # Never authorize a new entry from a stale Watchlist after an integration failure.
@@ -11864,6 +11881,9 @@ _SCANNER_TASK_LOCKS = {}
 _SCANNER_TASK_STATUS = {}
 
 def dispatch_scanner_task(name, function, *args, **kwargs):
+    if _discovery_paused():
+        MEMORY.setdefault("scanner_tasks", {})[name] = {"state": "PAUSED_FOR_POSITION", "last_completed": time.time()}
+        return False
     with _SCANNER_TASKS_LOCK:
         lock = _SCANNER_TASK_LOCKS.setdefault(name, threading.Lock())
         if not lock.acquire(blocking=False):
@@ -11873,7 +11893,7 @@ def dispatch_scanner_task(name, function, *args, **kwargs):
 
     def runner():
         try:
-            if STATE.get("open") or TRADE_STATE.get("in_position"):
+            if _discovery_paused():
                 _SCANNER_TASK_STATUS[name] = {"state": "PAUSED_FOR_POSITION", "last_completed": time.time()}
             else:
                 function(*args, **kwargs)
@@ -11902,7 +11922,7 @@ def run_global_discovery_scanner():
     meta = MEMORY.setdefault("discovery_scanner", {})
     meta.update({"state": "RUNNING", "last_started": started, "symbols_scanned": 0,
                  "universe_limit": SCANNER_UNIVERSE_MAX})
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
         return
     symbols = get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
@@ -11920,8 +11940,11 @@ def run_global_discovery_scanner():
         return
 
     # V2 first fetches market data into the bounded per-symbol cache.
+    if _discovery_paused():
+        meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
+        return
     run_scanner_v2(symbols=symbols)
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
 
@@ -11955,6 +11978,9 @@ def run_global_discovery_scanner():
                      "professional_candidates": len(pro_candidates)})
         return
 
+    if _discovery_paused():
+        meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
+        return
     rf_candidates = scan_market_rf(top_n=40, symbols=symbols)
     MEMORY["rf_watchlist"] = rf_candidates[:30]
     MEMORY["last_scan"] = time.time()
