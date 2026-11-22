@@ -6149,6 +6149,9 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
             )),
             now_ms=int(time.time() * 1000), cross_lookback_candles=8,
             pullback_lookback_candles=5, current_price=price,
+            setup_mode=str(management_state.get("entry_gate_setup_mode") or "CONTINUATION"),
+            institutional_evidence=list(management_state.get("entry_gate_evidence") or []),
+            institutional_event_id=str(management_state.get("entry_gate_event_id") or ""),
         )
         if (not final_gate.get("ready")
                 or final_gate.get("signal_candle_id") != gate_snapshot.get("signal_candle_id")):
@@ -6582,8 +6585,13 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         return False
     trade_id = uuid.uuid4().hex
     institutional_entry_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT") or {}
-    # Final execution-boundary gate: no institutional, sniper, RF or legacy
-    # setup can bypass the mandatory EMA9-to-session-VWAP closed-candle cross.
+    # The closed-candle EMA9/EMA15 cross starts the setup analysis. Reversal
+    # setups must then prove sweep/reclaim/MSS/retest through institutional
+    # evidence; continuation setups retain the stricter EMA-band pullback path.
+    gate_setup_type = str(institutional_entry_ctx.get("setup_type") or "").strip().upper()
+    gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
+    gate_evidence = list(institutional_entry_ctx.get("evidence") or [])
+    gate_event_id = str(institutional_entry_ctx.get("event_id") or "")
     gate_frame = institutional_entry_ctx.get("closed_candle_frame")
     gate_frame_source = institutional_entry_ctx.get("closed_candle_source") or "ENTRY_CONTEXT"
     gate_tf = str(institutional_entry_ctx.get("candle_timeframe") or INTERVAL)
@@ -6597,7 +6605,10 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
             now_ms=int(time.time() * 1000), cross_lookback_candles=8,
             pullback_lookback_candles=5, current_price=float(price),
+            setup_mode=gate_setup_mode, institutional_evidence=gate_evidence,
+            institutional_event_id=gate_event_id,
         )
+        gate_result["setup_mode"] = gate_setup_mode
         gate_result["frame_source"] = gate_frame_source
     except Exception as gate_exc:
         gate_result = {"ready": False, "reason": f"gate_error:{type(gate_exc).__name__}"}
@@ -7071,6 +7082,9 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "trail_activated": False, "be_done": False,
         "entry_gate_snapshot": dict(gate_result),
         "entry_gate_timeframe": gate_tf,
+        "entry_gate_setup_mode": gate_setup_mode,
+        "entry_gate_evidence": list(gate_evidence),
+        "entry_gate_event_id": gate_event_id,
     }
     if daily_loss_cooldown_active():
         log_execution(f"[ENTRY_BLOCKED] cooldown activated during validation; order not submitted for {symbol}", "WARN")
