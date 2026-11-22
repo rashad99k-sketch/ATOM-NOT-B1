@@ -91,7 +91,9 @@ def test_endpoint_429_cooldown_blocks_followup_without_sending_request():
     calls = []
     def limited(symbol):
         calls.append(symbol)
-        raise RuntimeError("HTTP 429 Too Many Requests")
+        if len(calls) == 1:
+            raise RuntimeError("HTTP 429 Too Many Requests")
+        return []
     raw.fetch_positions = limited
     governor = BingXAPIGovernor(
         min_intervals={"account_positions": 0}, cooldown_429=0.15, cooldown_418=0.2
@@ -108,7 +110,7 @@ def test_endpoint_429_cooldown_blocks_followup_without_sending_request():
 
     time.sleep(0.17)
     assert exchange.fetch_positions(["ETH/USDT"]) == []
-    assert len(calls) == 1  # raw FakeExchange method replaced; the success path below is separate
+    assert len(calls) == 2
 
 
 def test_418_cooldown_is_global_across_endpoint_categories():
