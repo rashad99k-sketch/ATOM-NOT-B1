@@ -15,15 +15,17 @@ _ACTIVE_TTL_SECONDS = 6 * 60 * 60
 _TERMINAL_STAGES = {"EXPIRED", "INVALIDATED", "COMPLETED", "ENTRY_WINDOW_MISSED"}
 _STORE = None
 _STORE_READY = False
+_PERSIST_OK = False
 _STORE_KEY = "m15_persistent_opportunity_registry_v1"
 
 
 def configure_m15_setup_store(store):
     """Attach the existing SQLite TradeJournal runtime-state store, if available."""
-    global _STORE, _STORE_READY
+    global _STORE, _STORE_READY, _PERSIST_OK
     with _LOCK:
         _STORE = store
         _STORE_READY = False
+        _PERSIST_OK = False
         _ensure_loaded_locked()
 
 
@@ -46,13 +48,16 @@ def _ensure_loaded_locked():
 
 
 def _persist_locked():
+    global _PERSIST_OK
     if _STORE is None:
+        _PERSIST_OK = False
         return False
     try:
         _STORE.set_runtime_state(_STORE_KEY, _ACTIVE)
-        return True
+        _PERSIST_OK = True
     except Exception:
-        return False
+        _PERSIST_OK = False
+    return _PERSIST_OK
 
 
 def clear_m15_setup_memory():
@@ -97,7 +102,7 @@ def _public_row(row, prior, mode, reason):
         "lifecycle_rejection_confirmed": bool(prior.get("rejection_confirmed")),
         "strategy_mode": mode, "strategy_mode_reason": reason,
         "lifecycle_event_id": prior.get("event_id"),
-        "lifecycle_persisted": _STORE is not None, "lifecycle_cycles_seen": int(prior.get("cycles_seen", 0)),
+        "lifecycle_persisted": bool(_PERSIST_OK), "lifecycle_cycles_seen": int(prior.get("cycles_seen", 0)),
         "lifecycle_minimum_retention_met": int(prior.get("cycles_seen", 0)) >= 2,
         "entry_authorization": False, "entry_readiness": "NOT_AUTHORIZED_BY_RADAR",
     })
