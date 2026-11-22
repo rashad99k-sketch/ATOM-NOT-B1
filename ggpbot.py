@@ -12300,18 +12300,21 @@ def run_m15_crossover_radar(symbols=None):
             crossover_rows.append(row)
     # Feed retained M15 opportunities into the existing unified Watchlist analyzer.
     # This is an in-memory candidate feed, not a second scanner or entry authority.
+    # Rebuild the analysis feed from the full persisted active registry, not only
+    # this cycle's 10-symbol batch; otherwise unscanned opportunities disappear.
+    active_setups = list_active_m15_setups()
     MEMORY["m15_setup_watchlist"] = [
         {
-            "symbol": row.get("symbol"),
-            "side_hint": row.get("lifecycle_direction"),
-            "score": max(0.0, 100.0 - float(row.get("ema_distance_atr") or 100.0)),
-            "m15_stage": row.get("lifecycle_stage"),
-            "m15_event_id": row.get("lifecycle_event_id"),
-            "m15_cross_timestamp_ms": row.get("lifecycle_cross_timestamp_ms"),
+            "symbol": item.get("symbol"),
+            "side_hint": item.get("direction"),
+            "score": 75.0,
+            "m15_stage": item.get("stage"),
+            "m15_event_id": item.get("event_id"),
+            "m15_cross_timestamp_ms": item.get("cross_timestamp_ms"),
             "source": "m15_runtime_watchlist",
         }
-        for row in crossover_rows if row.get("lifecycle_active")
-        and row.get("lifecycle_direction") in {"BUY", "SELL"}
+        for item in active_setups
+        if item.get("direction") in {"BUY", "SELL"}
     ]
     crossover_rows.sort(key=lambda item: (
         state_rank.get(str(item.get("crossover_status")), 3),
