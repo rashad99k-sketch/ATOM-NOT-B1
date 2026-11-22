@@ -11587,6 +11587,13 @@ def refresh_unified_institutional_watchlist(force=False):
             enrich=_enrich_with_existing_gpp_engines,
             should_stop=_discovery_paused
         )
+        # A cooperative yield is not a successful refresh. Keep stale Watchlist
+        # candidates from authorizing an entry if the position closes immediately after the yield.
+        if (MEMORY.get("unified_watchlist_stop_reason") == "DISCOVERY_PAUSED"
+                or _discovery_paused()):
+            MEMORY["_unified_watchlist_refresh_ok"] = False
+            log_execution("[INTEGRATION] unified Watchlist refresh yielded to trade/recovery lifecycle", "INFO")
+            return result
         proximity_meta = MEMORY.setdefault("ema9_vwap_proximity_scanner_meta", {})
         proximity_meta.update({
             "observed_this_batch": int(MEMORY.get("_proximity_batch_updates", 0)),
