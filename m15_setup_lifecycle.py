@@ -78,7 +78,7 @@ def list_active_m15_setups(*, now_ms=None):
     return active
 
 
-def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = None) -> Dict[str, Any]:
+def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = None, cycle_id: int | None = None) -> Dict[str, Any]:
     """Attach persistent stage + mode diagnostics to one radar row."""
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     now = now_ms / 1000.0
@@ -91,7 +91,9 @@ def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = Non
         state = str(row.get("opportunity_state") or "WAITING")
         cross_ts = row.get("signal_timestamp_ms") if status == "CROSS_CONFIRMED" else None
         direction = str(row.get("direction") or "UNKNOWN")
-        active = bool(prior and now - float(prior.get("_stored_at", 0)) <= _ACTIVE_TTL_SECONDS)
+        first_seen_seconds = (float(prior.get("first_seen_ms", 0)) / 1000.0) if prior else 0.0
+        active = bool(prior and first_seen_seconds > 0 and now - first_seen_seconds <= _ACTIVE_TTL_SECONDS)
+        cycle_id = int(cycle_id if cycle_id is not None else now_ms)
 
         if status == "CROSS_CONFIRMED" and cross_ts:
             if not active or int(prior.get("cross_timestamp_ms") or 0) != int(cross_ts):
