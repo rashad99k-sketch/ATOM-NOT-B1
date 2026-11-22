@@ -128,7 +128,12 @@ def list_active_m15_setups(*, now_ms=None):
                 continue
             # Retain terminal tombstones until TTL so an old cross cannot revive.
             if stage not in _TERMINAL_STAGES:
-                active.append({"symbol": symbol, "stage": stage})
+                active.append({
+                    "symbol": symbol, "stage": stage,
+                    "direction": item.get("direction"),
+                    "event_id": item.get("event_id"),
+                    "cross_timestamp_ms": item.get("cross_timestamp_ms"),
+                })
     return active
 
 
