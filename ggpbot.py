@@ -11147,6 +11147,7 @@ def main_loop_sniper():
     last_scan = 0
     last_candidate_scan = 0
     last_flow_update = 0
+    last_m15_radar_scan = 0.0
     try:
         ex.load_markets()
         log_execution(f"Markets loaded", "INFO")
@@ -11191,6 +11192,9 @@ def main_loop_sniper():
                 if INSUFFICIENT_MARGIN_COOLDOWN_UNTIL and time.time() < INSUFFICIENT_MARGIN_COOLDOWN_UNTIL:
                     time.sleep(1)
                     continue
+                if now - last_m15_radar_scan >= M15_RADAR_SCAN_INTERVAL_SECONDS:
+                    dispatch_scanner_task("m15_crossover_radar", run_m15_crossover_radar)
+                    last_m15_radar_scan = now
                 if now - last_scan >= GLOBAL_SCAN_INTERVAL:
                     dispatch_scanner_task("global_discovery", run_global_discovery_scanner)
                     last_scan = now
@@ -12130,6 +12134,9 @@ def run_global_discovery_scanner():
         "INFO", debounce_key="discovery_scanner_complete", debounce_sec=60
     )
 
+
+
+M15_RADAR_SCAN_INTERVAL_SECONDS = _env_int_range("M15_RADAR_SCAN_INTERVAL_SECONDS", 30, 10, 120)
 
 
 def run_m15_crossover_radar(symbols=None):
