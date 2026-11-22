@@ -366,9 +366,12 @@ def validate_ema915_vwap_pullback_entry_gate(
     institutional_event_id: Optional[str] = None,
     institutional_origin_timestamp: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Primary entry authority: fresh EMA9/EMA15 cross, VWAP alignment,
-    a subsequent pullback into the EMA band, then a closed-candle continuation
-    break. Pure validation only; it never places or manages orders.
+    """Validate a closed-candle EMA9/EMA15 cross with setup-specific confirmation.
+
+    Reversals require a later institutional sweep timestamp plus reclaim, closed
+    MSS, post-MSS retest and directional-trigger evidence. Continuations retain
+    the EMA-band pullback, directional rejection and breakout sequence. VWAP,
+    freshness and no-chase checks apply to both paths. This function never trades.
     """
     direction = str(side or "").strip().upper()
     expected = "BULLISH" if direction == "BUY" else "BEARISH"
