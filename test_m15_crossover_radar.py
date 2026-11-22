@@ -289,3 +289,36 @@ def test_scanner_frame_cache_separates_limit_and_timeframe(monkeypatch):
 
     with ggpbot._SCANNER_FRAME_CACHE_LOCK:
         ggpbot._SCANNER_FRAME_CACHE.clear()
+
+
+
+def test_market_catalogue_is_loaded_once_and_universe_is_cached(monkeypatch):
+    import ggpbot
+
+    class FakeExchange:
+        def __init__(self):
+            self.markets = None
+            self.load_calls = 0
+
+        def load_markets(self):
+            self.load_calls += 1
+            self.markets = {
+                "BTC/USDT:USDT": {"swap": True, "active": True},
+                "ETH/USDT:USDT": {"swap": True, "active": True},
+                "BTC/USD": {"swap": False, "active": True},
+            }
+            return self.markets
+
+    fake = FakeExchange()
+    monkeypatch.setattr(ggpbot, "ex", fake)
+    monkeypatch.setattr(
+        ggpbot, "_MARKET_UNIVERSE_CACHE",
+        {"timestamp": 0.0, "symbols": []},
+    )
+
+    first = ggpbot.get_usdt_perp_symbols()
+    second = ggpbot.get_usdt_perp_symbols()
+
+    assert first == ["BTC/USDT", "ETH/USDT"]
+    assert second == first
+    assert fake.load_calls == 1
