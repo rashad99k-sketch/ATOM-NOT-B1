@@ -187,6 +187,7 @@ def test_same_symbol_scanner_cache_miss_is_single_flight(monkeypatch):
 
 
 def test_bingx_429_kline_response_enters_cooldown_without_retry_storm(monkeypatch):
+    import time
     import ggpbot
 
     calls = []
@@ -206,6 +207,7 @@ def test_bingx_429_kline_response_enters_cooldown_without_retry_storm(monkeypatc
 
 
 def test_bingx_418_kline_response_enters_longer_cooldown(monkeypatch):
+    import time
     import ggpbot
 
     calls = []
@@ -222,3 +224,17 @@ def test_bingx_418_kline_response_enters_longer_cooldown(monkeypatch):
     assert result is None
     assert len(calls) == 1
     assert ggpbot._BINGX_KLINE_COOLDOWN_UNTIL - before >= 59
+
+
+
+def test_m15_radar_market_universe_is_cached_across_30_second_cycles(monkeypatch):
+    import ggpbot
+
+    calls = []
+    monkeypatch.setattr(ggpbot, "get_usdt_perp_symbols", lambda: calls.append(1) or ["BTC/USDT"])
+    monkeypatch.setitem(ggpbot.MEMORY, "m15_radar_universe_cache", {})
+    first = ggpbot._get_m15_radar_universe()
+    second = ggpbot._get_m15_radar_universe()
+
+    assert first == second == ["BTC/USDT"]
+    assert len(calls) == 1
