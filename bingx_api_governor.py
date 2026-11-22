@@ -233,7 +233,8 @@ class BingXAPIGovernor:
                 epoch = self._write_epoch
             else:
                 epoch = self._write_epoch
-        if verb != "GET":
+        request_body = args[5] if len(args) > 5 else kwargs.get("body")
+        if verb != "GET" or request_body not in (None, ""):
             return self._call_classified(category, priority, f"request:{path}", function, *args, **kwargs)
 
         key = (epoch, self._stable_get_key(path, api, args[3] if len(args) > 3 else kwargs.get("params")))
