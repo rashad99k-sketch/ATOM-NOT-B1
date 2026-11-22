@@ -29,8 +29,11 @@ def _connect():
 
 
 def _load(symbol: str):
-    with _connect() as conn:
+    conn = _connect()
+    try:
         row = conn.execute("SELECT payload, updated_at FROM m15_setup_lifecycle WHERE symbol=?", (symbol,)).fetchone()
+    finally:
+        conn.close()
     if not row:
         return None
     try:
@@ -43,13 +46,16 @@ def _load(symbol: str):
 
 def _save(symbol: str, payload: Dict[str, Any], now: float):
     clean = {k: v for k, v in payload.items() if not k.startswith("_")}
-    with _connect() as conn:
+    conn = _connect()
+    try:
         conn.execute(
             "INSERT INTO m15_setup_lifecycle(symbol,payload,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(symbol) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
             (symbol, json.dumps(clean, separators=(",", ":"), allow_nan=False), now),
         )
         conn.commit()
+    finally:
+        conn.close()
 
 
 def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = None) -> Dict[str, Any]:
