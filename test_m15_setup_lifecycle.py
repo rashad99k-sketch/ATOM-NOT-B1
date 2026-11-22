@@ -1,15 +1,20 @@
 import m15_setup_lifecycle as lifecycle
 
 
-def _row(symbol="YFI/USDT", status="CROSS_CONFIRMED", direction="SELL"):
-    return {
+BASE_TS = 1_800_000_000_000
+
+
+def _row(symbol="YFI/USDT", status="CROSS_CONFIRMED", direction="SELL", **overrides):
+    row = {
         "symbol": symbol, "crossover_status": status, "opportunity_state": "WAITING_FOR_PULLBACK",
-        "direction": direction, "signal_timestamp_ms": 1_800_000_000_000,
-        "ema_distance_atr": 0.18, "volume_ratio": 0.9,
-        "session_vwap": 100.0, "closed_price": 99.0,
-        "chart": {"timestamps": [1_800_000_000_000], "open": [99.5], "close": [99.0],
+        "direction": direction, "signal_timestamp_ms": BASE_TS,
+        "ema_distance_atr": 0.18, "volume_ratio": 0.9, "session_vwap": 100.0,
+        "closed_price": 99.0 if direction == "SELL" else 101.0,
+        "chart": {"timestamps": [BASE_TS], "open": [99.5], "close": [99.0],
                   "high": [100.0], "low": [98.8], "ema9": [100.2], "ema15": [100.4]},
     }
+    row.update(overrides)
+    return row
 
 
 def setup_function():
@@ -17,34 +22,98 @@ def setup_function():
 
 
 def test_cross_candidate_survives_disappearing_cross_marker_in_runtime_memory():
-    first = lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=1_800_000_010_000, cycle_id=1)
+    first = lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=BASE_TS + 10_000, cycle_id=1)
     assert first["lifecycle_active"] is True
     assert first["lifecycle_stage"] == "WAITING_FOR_PULLBACK"
     assert first["lifecycle_cycles_seen"] == 1
     assert first["entry_authorization"] is False
 
-    later = _row(status="NO_ACTIVE_CROSS")
-    later["signal_timestamp_ms"] = None
-    later["chart"] = {"timestamps": [1_800_000_000_000, 1_800_000_900_000],
-                      "open": [99.5, 99.3], "close": [99.0, 98.8],
-                      "high": [100.0, 99.6], "low": [98.8, 98.5],
-                      "ema9": [100.2, 100.0], "ema15": [100.4, 100.2]}
-    result = lifecycle.advance_m15_setup_lifecycle(later, now_ms=1_800_000_020_000, cycle_id=2)
+    later = _row(status="NO_ACTIVE_CROSS", signal_timestamp_ms=None)
+    later["chart"] = {
+        "timestamps": [BASE_TS, BASE_TS + 900_000],
+        "open": [99.5, 99.3], "close": [99.0, 98.8],
+        "high": [100.0, 99.6], "low": [98.8, 98.5],
+        "ema9": [100.2, 100.0], "ema15": [100.4, 100.2],
+    }
+    result = lifecycle.advance_m15_setup_lifecycle(later, now_ms=BASE_TS + 20_000, cycle_id=2)
     assert result["lifecycle_active"] is True
     assert result["lifecycle_direction"] == "SELL"
     assert result["lifecycle_cycles_seen"] == 2
     assert result["entry_authorization"] is False
-    assert any(x["symbol"] == "YFI/USDT" for x in lifecycle.list_active_m15_setups(now_ms=1_800_000_020_000))
+    assert any(x["symbol"] == "YFI/USDT" for x in lifecycle.list_active_m15_setups(now_ms=BASE_TS + 20_000))
 
 
-def test_pre_cross_is_tracked_without_authorizing_entry():
-    row = _row(status="PRE_CROSS")
-    row["signal_timestamp_ms"] = None
-    result = lifecycle.advance_m15_setup_lifecycle(row, now_ms=1_800_000_010_000, cycle_id=1)
+def test_pre_cross_transitions_to_waiting_for_candle_close_without_authorizing_entry():
+    row = _row(status="PRE_CROSS", signal_timestamp_ms=None)
+    result = lifecycle.advance_m15_setup_lifecycle(row, now_ms=BASE_TS + 10_000, cycle_id=1)
     assert result["lifecycle_stage"] == "CROSS_APPROACHING"
+    detected = _row(status="CROSS_DETECTED", signal_timestamp_ms=None)
+    result = lifecycle.advance_m15_setup_lifecycle(detected, now_ms=BASE_TS + 20_000, cycle_id=2)
+    assert result["lifecycle_stage"] == "WAITING_FOR_CANDLE_CLOSE"
     assert result["entry_authorization"] is False
 
 
+def test_pullback_retest_and_trigger_require_distinct_later_closed_candles():
+    chart = {
+        "timestamps": [BASE_TS, BASE_TS + 900_000, BASE_TS + 1_800_000, BASE_TS + 2_700_000, BASE_TS + 3_600_000],
+        "open": [101.0, 100.8, 100.35, 100.4, 100.9],
+        "close": [101.1, 100.3, 100.5, 100.8, 101.2],
+        "high": [101.2, 101.0, 100.7, 101.0, 101.3],
+        "low": [100.9, 100.1, 100.25, 100.3, 100.8],
+        "ema9": [100.2] * 5, "ema15": [100.4] * 5,
+    }
+    result = lifecycle.advance_m15_setup_lifecycle(
+        _row(direction="BUY", chart=chart, closed_price=101.2),
+        now_ms=BASE_TS + 3_700_000, cycle_id=1,
+    )
+    assert result["lifecycle_stage"] == "TRIGGER_CONFIRMED"
+    assert result["lifecycle_pullback_timestamp_ms"] == BASE_TS + 900_000
+    assert result["lifecycle_zone_hold_timestamp_ms"] == BASE_TS + 1_800_000
+    assert result["lifecycle_retest_timestamp_ms"] == BASE_TS + 2_700_000
+    assert result["lifecycle_trigger_timestamp_ms"] == BASE_TS + 3_600_000
+    assert result["entry_authorization"] is False
+
+
+def test_same_candle_touch_cannot_also_confirm_rejection():
+    chart = {
+        "timestamps": [BASE_TS, BASE_TS + 900_000],
+        "open": [101.0, 100.8], "close": [101.1, 101.0],
+        "high": [101.2, 101.1], "low": [100.9, 100.1],
+        "ema9": [100.2, 100.2], "ema15": [100.4, 100.4],
+    }
+    result = lifecycle.advance_m15_setup_lifecycle(
+        _row(direction="BUY", chart=chart, closed_price=101.0),
+        now_ms=BASE_TS + 1_000_000, cycle_id=1,
+    )
+    assert result["lifecycle_stage"] == "PULLBACK_DETECTED"
+    assert result["lifecycle_rejection_confirmed"] is False
+    assert result["entry_authorization"] is False
+
+
+def test_invalidated_cross_is_terminal_and_same_event_cannot_be_resurrected():
+    invalid = _row(opportunity_state="INVALIDATED", rejection_reason="CLOSED_PRICE_LOST_EMA9")
+    result = lifecycle.advance_m15_setup_lifecycle(invalid, now_ms=BASE_TS + 10_000, cycle_id=1)
+    assert result["lifecycle_active"] is False
+    assert result["lifecycle_stage"] == "INVALIDATED"
+    result = lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=BASE_TS + 20_000, cycle_id=2)
+    assert result["lifecycle_active"] is False
+    assert result["lifecycle_stage"] == "INVALIDATED"
+
+    new_event = _row(signal_timestamp_ms=BASE_TS + 900_000)
+    result = lifecycle.advance_m15_setup_lifecycle(new_event, now_ms=BASE_TS + 30_000, cycle_id=3)
+    assert result["lifecycle_active"] is True
+    assert result["lifecycle_stage"] == "WAITING_FOR_PULLBACK"
+
+
+def test_expired_radar_event_expires_retained_candidate():
+    lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=BASE_TS + 10_000, cycle_id=1)
+    expired = _row(status="EXPIRED", opportunity_state="EXPIRED", signal_timestamp_ms=None)
+    result = lifecycle.advance_m15_setup_lifecycle(expired, now_ms=BASE_TS + 20_000, cycle_id=2)
+    assert result["lifecycle_active"] is False
+    assert result["lifecycle_stage"] == "EXPIRED"
+    assert lifecycle.list_active_m15_setups(now_ms=BASE_TS + 20_000) == []
+
+
 def test_runtime_candidate_expires_without_disk_storage():
-    lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=1_800_000_010_000, cycle_id=1)
-    assert lifecycle.list_active_m15_setups(now_ms=1_800_000_010_000 + 7 * 60 * 60 * 1000) == []
+    lifecycle.advance_m15_setup_lifecycle(_row(), now_ms=BASE_TS + 10_000, cycle_id=1)
+    assert lifecycle.list_active_m15_setups(now_ms=BASE_TS + 7 * 60 * 60 * 1000) == []
