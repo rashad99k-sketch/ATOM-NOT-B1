@@ -11,8 +11,7 @@ def _cross_frame():
     # Stable pre-cross market followed by a modest, closed-candle bullish move.
     # The move is intentionally not a full EMA-band pullback + breakout sequence.
     closes = [100.0] * 32 + [
-        100.02, 100.04, 100.06, 100.08,
-        100.10, 100.12, 100.14, 100.16,
+        100.02, 100.04, 100.06, 100.08, 100.10, 100.12,
     ]
     start = (1_800_000_000_000 // 86_400_000) * 86_400_000  # exact UTC session midnight
     rows = []
