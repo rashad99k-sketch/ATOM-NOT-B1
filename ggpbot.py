@@ -565,6 +565,8 @@ BINGX_KLINE_MIN_INTERVAL = _env_float_range("BINGX_KLINE_MIN_INTERVAL", 1.05, 1.
 _API_METHOD_MIN_INTERVALS = {"fetch_ohlcv": BINGX_KLINE_MIN_INTERVAL}
 _API_RATE_LOCK = threading.Lock()
 _LAST_API_RATE_LIMIT = {"ts": 0.0, "method": "", "message": ""}
+_BINGX_KLINE_COOLDOWN_UNTIL = 0.0
+_BINGX_KLINE_COOLDOWN_LOCK = threading.RLock()
 
 def rate_limit(func=None):
     """Serialize API request starts, applying endpoint-specific minimum spacing."""
@@ -604,6 +606,17 @@ def cache_set(key, value):
                 CACHE.pop(old_key, None)
 
 def safe_api_call(func, *args, **kwargs):
+    global _BINGX_KLINE_COOLDOWN_UNTIL
+    method_name = getattr(func, "__name__", "exchange_call")
+    if method_name == "fetch_ohlcv":
+        with _BINGX_KLINE_COOLDOWN_LOCK:
+            remaining = _BINGX_KLINE_COOLDOWN_UNTIL - time.monotonic()
+        if remaining > 0:
+            _LAST_API_RATE_LIMIT.update({
+                "ts": time.time(), "method": method_name,
+                "message": f"local kline cooldown active for {remaining:.1f}s",
+            })
+            return None
     # Order creation is non-idempotent. Never automatically retry a timed-out
     # create_order call: BingX may have accepted the first request already.
     is_order_write = getattr(func, "__name__", "") in {"create_order", "create_market_order", "create_limit_order"}
@@ -629,13 +642,24 @@ def safe_api_call(func, *args, **kwargs):
             rate_limit(func)
             return func(*args, **kwargs)
         except Exception as e:
-            if "rate limit" in str(e).lower() or "100410" in str(e):
+            error_text = str(e).lower()
+            rate_limited = (
+                "rate limit" in error_text or "100410" in error_text
+                or "429" in error_text or "418" in error_text
+            )
+            if rate_limited:
+                status_418 = "418" in error_text
+                wait = 60 if status_418 else 30
+                if method_name == "fetch_ohlcv":
+                    with _BINGX_KLINE_COOLDOWN_LOCK:
+                        _BINGX_KLINE_COOLDOWN_UNTIL = max(
+                            _BINGX_KLINE_COOLDOWN_UNTIL, time.monotonic() + wait
+                        )
                 _LAST_API_RATE_LIMIT.update({
                     "ts": time.time(),
-                    "method": getattr(func, "__name__", "exchange_call"),
+                    "method": method_name,
                     "message": str(e)[:180],
                 })
-                wait = min(8, 2 ** attempt)
                 try:
                     log_execution(
                         f"[API_BACKOFF] {getattr(func, '__name__', 'exchange_call')} rate-limited; retry in {wait}s",
@@ -643,6 +667,9 @@ def safe_api_call(func, *args, **kwargs):
                     )
                 except Exception:
                     pass
+                # Do not hammer the endpoint with retries after a rate-limit response.
+                if method_name == "fetch_ohlcv" or status_418:
+                    return None
                 time.sleep(wait)
                 continue
             if attempt == 2:
@@ -7258,6 +7285,8 @@ def dynamic_spread_tolerance(symbol):
 _SCANNER_FRAME_CACHE = {}
 _SCANNER_FRAME_CACHE_LOCK = threading.RLock()
 _SCANNER_FRAME_CACHE_TTL = _env_float_range("SCANNER_FRAME_CACHE_TTL", 90.0, 15.0, 180.0)
+_SCANNER_FRAME_FETCH_LOCKS = {}
+_SCANNER_FRAME_FETCH_LOCKS_GUARD = threading.RLock()
 
 def _get_scanner_frame(symbol, limit=150):
     """One shared M15 discovery snapshot, filtered to fully closed candles."""
@@ -7265,26 +7294,30 @@ def _get_scanner_frame(symbol, limit=150):
 
 
 def _get_scanner_raw_frame(symbol, limit=150):
-    """Return the shared short-lived raw M15 snapshot for provisional radar only."""
+    """Return one shared raw M15 snapshot; serialize same-symbol cache misses."""
     key = str(symbol)
     now = time.monotonic()
     with _SCANNER_FRAME_CACHE_LOCK:
         item = _SCANNER_FRAME_CACHE.get(key)
         if item and now - item[0] < _SCANNER_FRAME_CACHE_TTL:
-            frame = item[1].copy()
-        else:
-            frame = None
-    if frame is None:
-        frame = get_ohlcv_safe(symbol, limit)
-    if frame is not None:
+            return item[1].copy()
+    with _SCANNER_FRAME_FETCH_LOCKS_GUARD:
+        fetch_lock = _SCANNER_FRAME_FETCH_LOCKS.setdefault(key, threading.Lock())
+    with fetch_lock:
+        now = time.monotonic()
         with _SCANNER_FRAME_CACHE_LOCK:
-            if not item or now - item[0] >= _SCANNER_FRAME_CACHE_TTL:
+            item = _SCANNER_FRAME_CACHE.get(key)
+            if item and now - item[0] < _SCANNER_FRAME_CACHE_TTL:
+                return item[1].copy()
+        frame = get_ohlcv_safe(symbol, limit)
+        if frame is not None:
+            with _SCANNER_FRAME_CACHE_LOCK:
                 _SCANNER_FRAME_CACHE[key] = (time.monotonic(), frame.copy())
                 if len(_SCANNER_FRAME_CACHE) > SCANNER_UNIVERSE_MAX + 20:
                     oldest = sorted(_SCANNER_FRAME_CACHE.items(), key=lambda kv: kv[1][0])
                     for old_key, _ in oldest[:max(1, len(_SCANNER_FRAME_CACHE) - SCANNER_UNIVERSE_MAX)]:
                         _SCANNER_FRAME_CACHE.pop(old_key, None)
-    return frame.copy() if frame is not None else None
+        return frame.copy() if frame is not None else None
 
 def get_usdt_perp_symbols():
     try:
