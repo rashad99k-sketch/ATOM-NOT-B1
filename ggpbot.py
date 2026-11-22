@@ -6615,9 +6615,11 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         log_execution(
             f"[EMA915_VWAP_PULLBACK_GATE] BLOCKED {symbol} {side} reason={gate_result.get('reason')} "
             f"EMA9={gate_result.get('ema9')} EMA15={gate_result.get('ema15')} "
-            f"VWAP={gate_result.get('vwap')} cross={gate_result.get('cross_direction')} "
-            f"cross_ts={gate_result.get('cross_timestamp')} pullback_ts={gate_result.get('pullback_timestamp')} "
-            f"closed_ts={gate_result.get('latest_closed_timestamp')}",
+            f"VWAP={gate_result.get('vwap')} indicator_status={gate_result.get('indicator_status', 'UNAVAILABLE')} "
+            f"bars={gate_result.get('closed_candle_count')} source={gate_result.get('frame_source', gate_frame_source)} "
+            f"cross={gate_result.get('cross_direction')} cross_ts={gate_result.get('cross_timestamp')} "
+            f"pullback_ts={gate_result.get('pullback_timestamp')} closed_ts={gate_result.get('latest_closed_timestamp')} "
+            f"data_age_sec={gate_result.get('data_age_seconds')}",
             "WARN", debounce_key=f"dual_ema_vwap_gate:{symbol}:{side}:{gate_result.get('reason')}",
             debounce_sec=5,
         )
