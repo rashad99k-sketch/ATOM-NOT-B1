@@ -267,3 +267,28 @@ def test_scanner_watchlist_dashboard_and_trade_management_share_one_budget():
     assert snapshot["categories"]["account_orders"]["attempts"] == 1
     assert snapshot["active"] == 0
     assert snapshot["queued"] == 0
+
+
+def test_total_and_free_balance_readers_share_one_bingx_payload(monkeypatch):
+    import ggpbot
+
+    calls = []
+    def fake_fetch_balance():
+        calls.append(1)
+        return {"total": {"USDT": 101.0}, "free": {"USDT": 77.0}}
+
+    monkeypatch.setattr(ggpbot, "PAPER_MODE", False)
+    monkeypatch.setattr(ggpbot.ex.raw_exchange, "fetch_balance", fake_fetch_balance)
+    with ggpbot.CACHE_LOCK:
+        ggpbot.CACHE.pop("bingx_balance_payload", None)
+        ggpbot.CACHE.pop("balance", None)
+        ggpbot.CACHE.pop("free_balance", None)
+
+    assert ggpbot.get_balance() == 101.0
+    assert ggpbot.get_free_balance() == 77.0
+    assert len(calls) == 1
+
+    with ggpbot.CACHE_LOCK:
+        ggpbot.CACHE.pop("bingx_balance_payload", None)
+        ggpbot.CACHE.pop("balance", None)
+        ggpbot.CACHE.pop("free_balance", None)
