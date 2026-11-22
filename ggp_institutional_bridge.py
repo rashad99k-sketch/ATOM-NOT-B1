@@ -761,8 +761,27 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
     candidates = ordered[:limit]
     cursor = int(memory.get("unified_watchlist_cursor", 0)) % len(candidates)
     count = min(max(1, int(batch_size)), len(candidates))
-    selected = [candidates[(cursor + i) % len(candidates)] for i in range(count)]
-    memory["unified_watchlist_cursor"] = (cursor + count) % len(candidates)
+    # Drain active M15 crossover opportunities before ordinary rotating discovery.
+    # A separate cursor prevents a large M15 queue from starving its later entries.
+    m15_candidates = [pair for pair in candidates
+                      if "m15_setup_watchlist" in (pair[1].get("sources") or [])
+                      and str(pair[1].get("m15_stage") or "").upper()
+                          not in {"INVALIDATED", "EXPIRED", "COMPLETED"}]
+    m15_keys = {pair[0] for pair in m15_candidates}
+    other_candidates = [pair for pair in candidates if pair[0] not in m15_keys]
+    m15_cursor = int(memory.get("m15_watchlist_cursor", 0)) % max(1, len(m15_candidates))
+    m15_take = min(count, len(m15_candidates))
+    selected_m15 = [m15_candidates[(m15_cursor + i) % len(m15_candidates)]
+                    for i in range(m15_take)] if m15_candidates else []
+    if m15_candidates:
+        memory["m15_watchlist_cursor"] = (m15_cursor + m15_take) % len(m15_candidates)
+    remaining = count - len(selected_m15)
+    cursor = int(memory.get("unified_watchlist_cursor", 0)) % max(1, len(other_candidates))
+    selected_other = [other_candidates[(cursor + i) % len(other_candidates)]
+                      for i in range(min(remaining, len(other_candidates)))] if other_candidates else []
+    if other_candidates:
+        memory["unified_watchlist_cursor"] = (cursor + len(selected_other)) % len(other_candidates)
+    selected = selected_m15 + selected_other
     for key, candidate in selected:
         if _stop_requested():
             return _stopped_return()
