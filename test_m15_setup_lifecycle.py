@@ -20,6 +20,7 @@ def test_cross_candidate_is_persisted_and_retained_after_cross_marker_disappears
     assert first["lifecycle_active"] is True
     assert first["lifecycle_stage"] == "WAITING_FOR_PULLBACK"
     assert first["entry_authorization"] is False
+    assert first["lifecycle_cycles_seen"] == 1
 
     # New scan no longer has a fresh cross, but the tracked setup must remain visible.
     later = _row(status="NO_ACTIVE_CROSS")
@@ -33,6 +34,8 @@ def test_cross_candidate_is_persisted_and_retained_after_cross_marker_disappears
     assert result["lifecycle_direction"] == "SELL"
     assert result["lifecycle_stage"] in {"WAITING_FOR_PULLBACK", "PULLBACK_DETECTED"}
     assert result["entry_authorization"] is False
+    assert result["lifecycle_cycles_seen"] >= 2
+    assert any(item["symbol"] == "YFI/USDT" for item in lifecycle.list_active_m15_setups(now_ms=1_800_000_020_000))
 
 
 def test_pre_cross_is_tracked_without_authorizing_entry(tmp_path, monkeypatch):
