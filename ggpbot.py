@@ -11584,7 +11584,8 @@ def refresh_unified_institutional_watchlist(force=False):
             MEMORY, _integration_fetch_frame,
             max_items=INSTITUTIONAL_WATCHLIST_MAX_SYMBOLS,
             batch_size=INSTITUTIONAL_WATCHLIST_BATCH_SIZE,
-            enrich=_enrich_with_existing_gpp_engines
+            enrich=_enrich_with_existing_gpp_engines,
+            should_stop=_discovery_paused
         )
         proximity_meta = MEMORY.setdefault("ema9_vwap_proximity_scanner_meta", {})
         proximity_meta.update({
@@ -11653,7 +11654,7 @@ def smart_opportunity_selection():
     if MEMORY.get("_unified_watchlist_refresh_ok") is False:
         log_execution("[ENTRY_GUARD] unified Watchlist refresh failed; stale candidates cannot authorize entries", "WARN")
         return False
-    if STATE.get("open") or TRADE_STATE.get("in_position"):
+    if _discovery_paused():
         return False
     if globals().get("RECOVERY_BLOCK_ENTRIES", False) or MEMORY.get("position_status") == "UNKNOWN":
         log_execution("[ENTRY_GUARD] Exchange recovery is unresolved; new entries blocked", "WARN")
@@ -11716,6 +11717,8 @@ def smart_opportunity_selection():
     ready.sort(key=_location_first_rank, reverse=True)
     # Bound entry revalidation work per loop; the rotating Watchlist analyzes the rest.
     for canonical, item in ready[:8]:
+        if _discovery_paused():
+            return False
         try:
             side = str(item.get("side", "")).upper()
             if side not in ("BUY", "SELL"):
@@ -11741,6 +11744,8 @@ def smart_opportunity_selection():
                 side_hints=item.get("side_hints") or [side],
             )
             fresh.update(_enrich_with_existing_gpp_engines(closed_df, fresh.get("side"), fresh))
+            if _discovery_paused():
+                return False
             item.update(fresh)
             item["source"] = item.get("source") or "unified_watchlist"
             if item.get("decision_state") != "ENTRY_READY":
@@ -11863,6 +11868,10 @@ def smart_opportunity_selection():
                 "closed_candle_timestamp": int(closed_df["timestamp"].iloc[-1]),
             }
             reason = "UNIFIED_INSTITUTIONAL_ENTRY | " + " | ".join(evidence)
+            # Recheck immediately before entering the single execution gateway.
+            if _discovery_paused():
+                _INSTITUTIONAL_ENTRY_CONTEXT = None
+                return False
             try:
                 is_strong = is_strong_candidate(item)
                 sizing_class = "SNIPER" if is_strong else "TREND"
