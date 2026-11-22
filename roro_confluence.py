@@ -411,6 +411,29 @@ def validate_ema915_vwap_pullback_entry_gate(
     now_value_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     data_age = (now_value_ms - (latest_ts + tf * 1000)) / 1000.0
     max_data_age = 2.0 * tf
+
+    # Publish the computed indicator snapshot before any setup-quality early
+    # return. Previously EMA9/EMA15/VWAP were written only on ENTRY_READY, so
+    # legitimate rejections such as "missing_fresh_ema9_ema15_cross" were
+    # logged with all three values as None, falsely suggesting missing data.
+    ema9_now = float(ema9.iloc[-1])
+    ema15_now = float(ema15.iloc[-1])
+    vwap_now = float(vwap.iloc[-1])
+    result.update({
+        "ema9": ema9_now if np.isfinite(ema9_now) else None,
+        "ema15": ema15_now if np.isfinite(ema15_now) else None,
+        "vwap": vwap_now if np.isfinite(vwap_now) else None,
+        "atr": atr if np.isfinite(atr) else None,
+        "latest_closed_timestamp": latest_ts,
+        "data_age_seconds": data_age,
+        "max_data_age_seconds": max_data_age,
+        "closed_candle_count": int(len(closed)),
+        "timeframe_seconds": tf,
+        "indicator_status": (
+            "COMPUTED" if all(np.isfinite(v) for v in (ema9_now, ema15_now, vwap_now))
+            else "INVALID"
+        ),
+    })
     if data_age < 0.0 or data_age > max_data_age:
         result.update({"reason": "stale_closed_candle_data", "data_age_seconds": data_age,
                        "max_data_age_seconds": max_data_age})
