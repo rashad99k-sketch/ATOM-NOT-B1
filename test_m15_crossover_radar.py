@@ -238,3 +238,54 @@ def test_m15_radar_market_universe_is_cached_across_30_second_cycles(monkeypatch
 
     assert first == second == ["BTC/USDT"]
     assert len(calls) == 1
+
+
+
+def test_concurrent_kline_workers_are_suppressed_after_first_429(monkeypatch):
+    """Workers queued before a 429 must re-check cooldown before calling BingX."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    import ggpbot
+
+    calls = []
+    ggpbot._BINGX_KLINE_COOLDOWN_UNTIL = 0.0
+
+    def fetch_ohlcv(*args, **kwargs):
+        calls.append(1)
+        time.sleep(0.03)
+        raise RuntimeError("HTTP 429 Too Many Requests")
+
+    monkeypatch.setattr(ggpbot, "rate_limit", lambda func=None: None)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda _: ggpbot.safe_api_call(fetch_ohlcv, "BTC/USDT:USDT", "15m", limit=150),
+            range(8),
+        ))
+
+    assert results == [None] * 8
+    assert len(calls) == 1, "queued workers must not send requests during the cooldown"
+    assert ggpbot._BINGX_KLINE_COOLDOWN_UNTIL > time.monotonic()
+    ggpbot._BINGX_KLINE_COOLDOWN_UNTIL = 0.0
+
+
+def test_scanner_frame_cache_separates_limit_and_timeframe(monkeypatch):
+    import ggpbot
+
+    calls = []
+    frame = frame_from_closes([100.0] * 120, NOW - 120 * 900_000)
+
+    def fake_fetch(symbol, limit):
+        calls.append((symbol, limit))
+        return frame.copy()
+
+    with ggpbot._SCANNER_FRAME_CACHE_LOCK:
+        ggpbot._SCANNER_FRAME_CACHE.clear()
+    monkeypatch.setattr(ggpbot, "get_ohlcv_safe", fake_fetch)
+    monkeypatch.setattr(ggpbot, "INTERVAL", "15m")
+
+    ggpbot._get_scanner_raw_frame("CACHE/USDT", 150)
+    ggpbot._get_scanner_raw_frame("CACHE/USDT", 100)
+    assert calls == [("CACHE/USDT", 150), ("CACHE/USDT", 100)]
+
+    with ggpbot._SCANNER_FRAME_CACHE_LOCK:
+        ggpbot._SCANNER_FRAME_CACHE.clear()
