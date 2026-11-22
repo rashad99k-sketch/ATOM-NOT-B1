@@ -12256,6 +12256,7 @@ def run_m15_crossover_radar(symbols=None):
         f"{sum(x.get('crossover_status') == 'CROSS_CONFIRMED' for x in crossover_rows)} "
         f"intrabar={sum(x.get('crossover_status') == 'CROSS_DETECTED' for x in crossover_rows)} "
         f"pre_cross={sum(x.get('crossover_status') == 'PRE_CROSS' for x in crossover_rows)} "
+        f"new_events={new_cross_count} active_queue={len(MEMORY.get('m15_setup_watchlist', []))} "
         "authority=DISCOVERY_ONLY",
         "INFO", debounce_key="m15_crossover_radar", debounce_sec=30
     )
