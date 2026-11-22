@@ -11915,7 +11915,10 @@ def dispatch_scanner_task(name, function, *args, **kwargs):
                 _SCANNER_TASK_STATUS[name] = {"state": "PAUSED_FOR_POSITION", "last_completed": time.time()}
             else:
                 function(*args, **kwargs)
-                _SCANNER_TASK_STATUS[name] = {"state": "IDLE", "last_completed": time.time(), "last_error": None}
+                _SCANNER_TASK_STATUS[name] = {
+                    "state": "PAUSED_FOR_POSITION" if _discovery_paused() else "IDLE",
+                    "last_completed": time.time(), "last_error": None
+                }
         except Exception as exc:
             _SCANNER_TASK_STATUS[name] = {
                 "state": "ERROR", "last_completed": time.time(),
