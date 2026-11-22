@@ -68,7 +68,7 @@ def test_pullback_retest_and_trigger_require_distinct_later_closed_candles():
     )
     assert result["lifecycle_stage"] == "TRIGGER_CONFIRMED"
     assert result["lifecycle_pullback_timestamp_ms"] == BASE_TS + 900_000
-    assert result["lifecycle_zone_hold_timestamp_ms"] == BASE_TS + 1_800_000
+    assert result["lifecycle_pullback_hold_timestamp_ms"] == BASE_TS + 1_800_000
     assert result["lifecycle_retest_timestamp_ms"] == BASE_TS + 2_700_000
     assert result["lifecycle_trigger_timestamp_ms"] == BASE_TS + 3_600_000
     assert result["entry_authorization"] is False
