@@ -7305,6 +7305,8 @@ def rf_proximity_score(rf, adx_val, vol_ok, rsi_val, atr_pct):
     return float(score)
 
 def scan_market_rf(top_n=40, symbols=None):
+    if _discovery_paused():
+        return []
     symbols = list(symbols) if symbols is not None else get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
     symbols = symbols[:SCANNER_UNIVERSE_MAX]
     if not symbols:
@@ -7369,12 +7371,14 @@ def scan_market_rf(top_n=40, symbols=None):
 
 # ========== SMART SCANNER v2 ==========
 def smart_scanner_v2(symbols=None):
+    if _discovery_paused():
+        return [], []
     symbols = list(symbols) if symbols is not None else get_usdt_perp_symbols()[:SCANNER_UNIVERSE_MAX]
     symbols = symbols[:SCANNER_UNIVERSE_MAX]
     buy_candidates = []
     sell_candidates = []
     for sym in symbols:
-        if STATE.get("open") or TRADE_STATE.get("in_position"):
+        if _discovery_paused():
             break
         try:
             df = _get_scanner_frame(sym, 150)
@@ -8973,9 +8977,13 @@ def radar_score(df):
     return score
 
 def rebuild_radar_watchlist():
+    if _discovery_paused():
+        return
     symbols = get_usdt_perp_symbols()
     candidates = []
     for sym in symbols[:150]:
+        if _discovery_paused():
+            break
         try:
             df = get_ohlcv_safe(sym, 100)
             if df is None or not validate_dataframe(df, 80) or not fast_market_filter(df):
@@ -8991,9 +8999,13 @@ def rebuild_radar_watchlist():
     log_execution(f"Radar rebuilt: {len(candidates)} candidates, top5: {[c['symbol'] for c in MEMORY['radar_top5']]}", "INFO")
 
 def refresh_radar_watchlist():
+    if _discovery_paused():
+        return
     wl = MEMORY.get("radar_watchlist", [])
     updated = []
     for entry in wl:
+        if _discovery_paused():
+            break
         sym = entry["symbol"]
         try:
             df = get_ohlcv_safe(sym, 100)
@@ -9010,6 +9022,8 @@ def refresh_radar_watchlist():
     log_execution(f"Radar refreshed: {len(updated)} symbols remain in watchlist", "INFO")
 
 def radar_entry_scan():
+    if _discovery_paused():
+        return
     if not MEMORY.get("radar_top5"):
         return
     now = time.time()
@@ -10732,6 +10746,9 @@ def _sniper_v2_structural_stop(side, zone, atr_value, roro_stop):
 
 def sniper_engine_v2():
     """One bounded scan cycle; execution stays on the unified GGP/RORO path."""
+    if _discovery_paused():
+        SNIPER_V2_METRICS["state"] = "PAUSED_FOR_POSITION_OR_RECOVERY"
+        return False
     if daily_loss_cooldown_active():
         SNIPER_V2_METRICS["state"] = "PAUSED_DAILY_LOSS_COOLDOWN"
         return False
@@ -10753,7 +10770,7 @@ def sniper_engine_v2():
             "zones_waiting": 0, "zones_ready": 0, "last_error": None,
         })
         for symbol in symbols:
-            if STATE.get("open") or TRADE_STATE.get("in_position"):
+            if _discovery_paused():
                 break
             raw_frame = _get_scanner_frame(symbol, 150)
             if raw_frame is None or not validate_dataframe(raw_frame, 80):
@@ -12023,6 +12040,8 @@ def run_global_discovery_scanner():
     crossover_scan_time_ms = int(time.time() * 1000)
     state_rank = {"CROSS_CONFIRMED": 0, "CROSS_DETECTED": 1, "PRE_CROSS": 2}
     for symbol in symbols:
+        if _discovery_paused():
+            break
         raw_frame = _get_scanner_raw_frame(symbol, 150)
         try:
             row = evaluate_m15_radar(symbol, raw_frame, now_ms=crossover_scan_time_ms)
