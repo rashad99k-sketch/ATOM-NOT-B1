@@ -668,9 +668,13 @@ def safe_api_call(func, *args, **kwargs):
                     )
                 except Exception:
                     pass
-                # The central governor owns cooldowns. Never retry a rate-limited
-                # request here; this prevents every caller from waking together.
-                return None
+                # Keep the legacy bounded wait for endpoint-scoped 429s. The
+                # central governor blocks queued requests during this interval,
+                # so workers resume through one scheduler rather than stampeding.
+                if method_name == "fetch_ohlcv" or status_418:
+                    return None
+                time.sleep(wait)
+                continue
             if attempt == 2:
                 raise
             time.sleep(1)
@@ -11120,13 +11124,6 @@ CANDIDATE_SCAN_INTERVAL = 15
 
 def sync_position_with_exchange(symbol):
     try:
-        # Flat-state polling is shared briefly across supervisors. Once a local
-        # position exists, always read fresh exchange state for reconciliation.
-        cache_key = f"flat_position_snapshot_{normalize_symbol(symbol)}"
-        if not STATE.get("open") and not TRADE_STATE.get("in_position"):
-            cached_snapshot = cache_get(cache_key, 2.0)
-            if cached_snapshot is not None:
-                return cached_snapshot.get("position")
         if hasattr(ex, 'fetch_positions'):
             positions = safe_api_call(ex.fetch_positions, [normalize_symbol(symbol)])
         elif hasattr(ex, 'fetch_open_positions'):
@@ -11134,15 +11131,11 @@ def sync_position_with_exchange(symbol):
         else:
             return None
         if not positions:
-            if not STATE.get("open") and not TRADE_STATE.get("in_position"):
-                cache_set(cache_key, {"position": None})
             return None
         for pos in positions:
             pos_sym = pos.get('symbol', pos.get('info', {}).get('symbol', ''))
             if normalize_symbol(symbol) in pos_sym and float(pos.get('contracts', 0)) > 0:
                 return pos
-        if not STATE.get("open") and not TRADE_STATE.get("in_position"):
-            cache_set(cache_key, {"position": None})
         return None
     except Exception as e:
         log_execution(f"[SYNC] error: {e}", "ERROR")
