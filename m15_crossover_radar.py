@@ -144,6 +144,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     candle_range = float(candle["high"] - candle["low"])
     body_ratio = abs(float(candle["close"] - candle["open"])) / candle_range if candle_range > 0 else None
     close_position = (float(candle["close"] - candle["low"]) / candle_range) if candle_range > 0 else None
+    displacement_atr = abs(float(candle["close"] - candle["open"])) / atr if atr > 0 else None
+    price_extension_atr = abs(float(price) - float(e9)) / atr if atr > 0 else None
     if status == "CROSS_CONFIRMED" and direction:
         if direction == "BUY" and price <= e9:
             state, reason = "INVALIDATED", "CLOSED_PRICE_LOST_EMA9_AFTER_BULLISH_CROSS"
@@ -190,6 +192,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
             "ema_gap_contracting": bool(contracted),
             "body_to_range": round(body_ratio, 5) if body_ratio is not None else None,
             "close_position": round(close_position, 5) if close_position is not None else None,
+            "displacement_atr": round(displacement_atr, 5) if displacement_atr is not None else None,
+            "price_extension_atr": round(price_extension_atr, 5) if price_extension_atr is not None else None,
             "volume_ratio": round(volume_ratio, 5) if volume_ratio is not None else None,
             "vwap_available": vwap is not None,
             "source": "CLOSED_M15_PLUS_PROVISIONAL_CURRENT_CANDLE",
