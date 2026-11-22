@@ -58,6 +58,26 @@ def _save(symbol: str, payload: Dict[str, Any], now: float):
         conn.close()
 
 
+def list_active_m15_setups(*, now_ms=None):
+    now = float(now_ms if now_ms is not None else time.time() * 1000) / 1000.0
+    conn = _connect()
+    try:
+        rows = conn.execute('SELECT symbol, payload FROM m15_setup_lifecycle').fetchall()
+    finally:
+        conn.close()
+    active = []
+    for symbol, raw in rows:
+        try:
+            payload = json.loads(raw)
+            first_seen = float(payload.get('first_seen_ms', 0)) / 1000.0
+            stage = str(payload.get('stage') or '')
+            if stage not in ('EXPIRED', 'INVALIDATED', 'COMPLETED') and first_seen > 0 and now - first_seen <= _ACTIVE_TTL_SECONDS:
+                active.append({'symbol': symbol, 'stage': stage})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return active
+
+
 def advance_m15_setup_lifecycle(row: Dict[str, Any], *, now_ms: int | None = None) -> Dict[str, Any]:
     """Attach persistent stage + mode diagnostics to one radar row."""
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
