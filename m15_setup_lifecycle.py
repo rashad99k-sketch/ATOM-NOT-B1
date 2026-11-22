@@ -1,10 +1,12 @@
 """Runtime-only M15 crossover candidate lifecycle.
 
-This module retains M15 observations in process memory only. It never grants
+This module retains M15 observations in process memory and optionally persists
+them through the existing TradeJournal runtime-state store. It never grants
 entry authority and never submits, modifies, or closes an order.
 """
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from typing import Any, Dict
@@ -41,7 +43,10 @@ def _ensure_loaded_locked():
         if isinstance(saved, dict):
             for key, value in saved.items():
                 if isinstance(value, dict) and value.get("symbol"):
-                    _ACTIVE[str(key)] = dict(value)
+                    _ACTIVE[str(key)] = copy.deepcopy(value)
+            # A successful read means the configured persistence backend is reachable.
+            global _PERSIST_OK
+            _PERSIST_OK = True
     except Exception:
         # Keep the in-memory lifecycle available, but never claim it was persisted.
         _STORE_READY = False
@@ -53,7 +58,7 @@ def _persist_locked():
         _PERSIST_OK = False
         return False
     try:
-        _STORE.set_runtime_state(_STORE_KEY, _ACTIVE)
+        _STORE.set_runtime_state(_STORE_KEY, copy.deepcopy(_ACTIVE))
         _PERSIST_OK = True
     except Exception:
         _PERSIST_OK = False
