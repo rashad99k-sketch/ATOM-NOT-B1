@@ -98,9 +98,16 @@ def test_api_request_start_rate_limit_uses_a_thread_lock():
 
 def test_rf_scanner_yields_to_open_position():
     fn = _function("scan_market_rf")
-    names = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
-    assert "STATE" in names and "TRADE_STATE" in names
-    assert any(isinstance(node, ast.Compare) for node in ast.walk(fn))
+    pause_calls = [
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_discovery_paused"
+    ]
+    assert len(pause_calls) >= 2  # before starting and while iterating symbols
+
+    pause_gate = _function("_discovery_paused")
+    gate_names = {node.id for node in ast.walk(pause_gate) if isinstance(node, ast.Name)}
+    assert {"STATE", "TRADE_STATE"}.issubset(gate_names)
 
 
 def test_scanner_config_has_bounded_environment_parsing():
