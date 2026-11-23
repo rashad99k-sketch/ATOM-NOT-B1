@@ -382,24 +382,72 @@ class TradeExecutionService:
                 try: trades = fetch_trades(symbol, None, 100, {"orderId": order_id})
                 except Exception: pass
             average = _weighted_trade_average(trades)
+
+        # A partially filled market order must not leave an unverified remainder
+        # working on the exchange. Cancel once by the exchange order ID, then read
+        # the order back. Never resubmit the market entry.
+        remainder_cancel_status = "NOT_REQUIRED"
+        terminal_statuses = {"REJECTED", "CANCELED", "CANCELLED", "CLOSED", "FILLED", "EXPIRED"}
+        observed_status = _status(observed_order)
+        if filled > 0 and remaining > 0 and observed_status not in terminal_statuses:
+            cancel_fn = getattr(self.exchange, "cancel_order", None)
+            if callable(cancel_fn) and order_id:
+                cancel_response = None
+                try:
+                    try:
+                        cancel_response = cancel_fn(order_id, symbol)
+                    except TypeError:
+                        cancel_response = cancel_fn(order_id, symbol, {"clientOrderId": client_order_id})
+                    refreshed = self._find_order(symbol, order_id, client_order_id)
+                    readback = refreshed if refreshed is not None else cancel_response
+                    readback_status = _status(readback)
+                    if readback is not None and readback_status in terminal_statuses:
+                        observed_order = readback
+                        filled = max(filled, _extract_filled(readback))
+                        remaining = _extract_remaining(readback, requested, filled)
+                        refreshed_average = _extract_average(readback)
+                        if refreshed_average is not None:
+                            average = refreshed_average
+                        remainder_cancel_status = "VERIFIED"
+                    else:
+                        remainder_cancel_status = "UNVERIFIED"
+                except Exception:
+                    # A failed cancel response is not proof that the order is gone.
+                    refreshed = self._find_order(symbol, order_id, client_order_id)
+                    if refreshed is not None and _status(refreshed) in terminal_statuses:
+                        observed_order = refreshed
+                        filled = max(filled, _extract_filled(refreshed))
+                        remaining = _extract_remaining(refreshed, requested, filled)
+                        refreshed_average = _extract_average(refreshed)
+                        if refreshed_average is not None:
+                            average = refreshed_average
+                        remainder_cancel_status = "VERIFIED"
+                    else:
+                        remainder_cancel_status = "UNVERIFIED"
+            else:
+                remainder_cancel_status = "UNVERIFIED"
+
         position = self._position(symbol, params["positionSide"], side)
         position_query_available = callable(getattr(self.exchange, "fetch_positions", None))
         if _status(observed_order) in {"REJECTED", "CANCELED", "CANCELLED", "EXPIRED"} and filled <= 0:
             state = ExecutionState.REJECTED
+        elif remainder_cancel_status == "UNVERIFIED":
+            state = ExecutionState.EXECUTION_UNCERTAIN
         elif position_query_available and position is None:
             state = ExecutionState.EXECUTION_UNCERTAIN
         elif filled <= 0 and position is None:
             state = ExecutionState.REJECTED if _status(observed_order) in {"REJECTED", "CANCELED", "CANCELLED", "EXPIRED"} else ExecutionState.EXECUTION_UNCERTAIN
         elif average is None:
             state = ExecutionState.ENTRY_PRICE_UNKNOWN
-        elif remaining > 0:
+        elif filled < requested - max(1e-12, requested * 1e-9):
             state = ExecutionState.PARTIAL_FILL
         else:
             state = ExecutionState.FILLED
         result = ExecutionResult(state, trade_id, client_order_id, order_id, requested, filled, remaining,
                                  average, average, mode_result.mode.value, params["positionSide"],
-                                 reason=f"order_status={_status(observed_order)}", raw_order=observed_order,
-                                 raw_position=position)
+                                 reason=(f"order_status={_status(observed_order)};"
+                                         f"remainder_cancel={remainder_cancel_status}"),
+                                 raw_order=observed_order, raw_position=position)
         if self.journal is not None and hasattr(self.journal, "record_execution"):
             self.journal.record_execution(
                 trade_id, exchange_order_id=order_id, filled_qty=filled,
