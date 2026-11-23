@@ -49,7 +49,7 @@ def test_runtime_bootstrap_records_supervisor_exception(tmp_path):
 
     assert bootstrap.start(fail, state, str(tmp_path / "runtime.lock")) is True
     deadline = time.time() + 1
-    while bootstrap.is_alive() and time.time() < deadline:
+    while state.get("status") != "FAILED" and time.time() < deadline:
         time.sleep(0.01)
     assert state["status"] == "FAILED"
     assert "RuntimeError:startup failed" == state["last_error"]
