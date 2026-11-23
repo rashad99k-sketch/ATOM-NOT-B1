@@ -169,46 +169,51 @@ def _impulse_frame(side="BUY"):
     frame.loc[:, "low"] = 99.95
     frame.loc[:, "close"] = 100.0
     frame.loc[:, "volume"] = 100.0
-    # Cross on candle -3; -2 is the post-cross transition; -1 is the impulse.
-    frame.loc[len(frame) - 3, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.10 if side == "BUY" else 100.0,
-        100.0 if side == "BUY" else 99.90,
-        100.05 if side == "BUY" else 99.95, 100.0
-    ]
-    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.05, 99.95, 100.0, 100.0
+
+    # The crossover is on the previous completed candle; the latest candle is
+    # the distinct impulse/BOS confirmation.
+    frame.loc[len(frame)-2, ["open", "high", "low", "close", "volume"]] = [
+        100.0, 100.08 if side == "BUY" else 100.0,
+        100.0 if side == "BUY" else 99.92,
+        100.04 if side == "BUY" else 99.96, 100.0
     ]
     prior = frame.iloc[-11:-1]
     level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
     open_price = level - 1.00 * direction
     close_price = level + 1.00 * direction
-    frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
+    frame.loc[len(frame)-1, ["open", "high", "low", "close", "volume"]] = [
         open_price, max(open_price, close_price) + 0.05,
         min(open_price, close_price) - 0.05, close_price, 300.0
     ]
 
-    def _ema(values, period):
+    def impulse_ema(values, period):
+        n = len(values)
         if period == 9:
             if side == "BUY":
-                arr = np.full(len(values), 101.8, dtype=float)
-                arr[-3:] = 102.0
+                out = np.full(n, 101.8, dtype=float)
+                out[-2:] = 102.0
             else:
-                arr = np.full(len(values), 98.2, dtype=float)
-                arr[-3:] = 98.0
+                out = np.full(n, 98.2, dtype=float)
+                out[-2:] = 98.0
         elif period == 15:
-            arr = np.full(len(values), 101.9 if side == "BUY" else 98.1, dtype=float)
-        elif period == 20:
-            arr = np.full(len(values), 100.0, dtype=float)
+            out = np.full(n, 101.9 if side == "BUY" else 98.1, dtype=float)
+        elif period in (20, 50):
+            out = np.full(n, 100.0, dtype=float)
         else:
-            arr = values.ewm(span=period, adjust=False).mean().to_numpy(dtype=float)
-        return pd.Series(arr, index=values.index)
+            out = values.ewm(span=period, adjust=False).mean().to_numpy(dtype=float)
+        return pd.Series(out, index=values.index)
 
-    monkeypatch_vwap = 100.5 if side == "SELL" else 99.5
-    confluence.compute_session_vwap = lambda closed, timeframe_seconds, now_ms=None: pd.Series(
-        monkeypatch_vwap, index=closed.index, dtype=float
+    monkeypatch.setattr(
+        confluence,
+        "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(
+            100.5 if side == "SELL" else 99.5,
+            index=closed.index,
+            dtype=float,
+        ),
     )
     live = close_price + 0.02 * direction
-    return frame, int(frame.timestamp.iloc[-1] + 901_000), live, _ema
+    return frame, int(frame.timestamp.iloc[-1] + 901_000), live, impulse_ema
 
 
 
