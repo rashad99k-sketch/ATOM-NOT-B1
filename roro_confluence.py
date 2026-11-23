@@ -799,8 +799,11 @@ def validate_ema915_vwap_pullback_entry_gate(
         result.update({"reason": "ema9_ema15_cross_direction_mismatch",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
-    if cross_age_bars < 2:
-        result.update({"reason": "waiting_for_post_cross_pullback",
+    # Continuation impulse is eligible on the first closed candle after the
+    # EMA9/EMA15 cross. Reversal remains deliberately delayed and must still
+    # wait for its independent institutional confirmation sequence.
+    if cross_age_bars < (1 if not is_reversal_setup else 2):
+        result.update({"reason": "waiting_for_post_cross_confirmation",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
     max_cross_age = cross_window if is_reversal_setup else pullback_window + 1
