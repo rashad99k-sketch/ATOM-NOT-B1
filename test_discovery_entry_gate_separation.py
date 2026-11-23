@@ -12,7 +12,8 @@ def _project_root():
 
 def _function(source, name):
     tree = ast.parse(source)
-    return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    matches = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name]
+    return matches[-1]
 
 
 def _load_gate(state, trade_state, memory, recovery_block):
