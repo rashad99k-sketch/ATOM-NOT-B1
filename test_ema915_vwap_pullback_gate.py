@@ -354,3 +354,34 @@ def test_institutional_zone_retest_is_separate_from_ema50_macro_pullback(monkeyp
     assert result["entry_mode"] == "RETEST"
     assert result["macro_pullback"] is False
     assert result["authorization_state"] == "EMA915_VWAP_RETEST_VALID"
+
+
+def test_macro_alignment_exception_never_weakens_reversal_vwap_gate(monkeypatch):
+    frame = _frame("BUY")
+    def ema_with_macro_trend(values, period):
+        if period == 9:
+            out = np.full(len(values), 99.8, dtype=float)
+            out[-4:] = 100.2
+        elif period == 15:
+            out = np.full(len(values), 100.0, dtype=float)
+        elif period == 20:
+            out = np.full(len(values), 100.3, dtype=float)
+            out[-4:] = [100.3, 100.4, 100.5, 100.6]
+        elif period == 50:
+            out = np.full(len(values), 99.8, dtype=float)
+            out[-4:] = [99.8, 99.9, 99.95, 100.0]
+        else:
+            raise AssertionError(f"unexpected EMA period: {period}")
+        return pd.Series(out, index=values.index)
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(100.4, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", ema_with_macro_trend, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.5,
+        setup_mode="REVERSAL",
+    )
+    assert result["macro_trend_aligned"] is True
+    assert result["ready"] is False
+    assert result["reason"] == "ema915_or_vwap_direction_not_aligned"
