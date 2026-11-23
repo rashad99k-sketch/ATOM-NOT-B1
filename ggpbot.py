@@ -61,6 +61,7 @@ except Exception as _env_exc:
     print(f"[ENV] configuration loader unavailable: {type(_env_exc).__name__}; process environment only")
 
 from ggp_runtime_config import resolve_trading_mode
+from ggp_dashboard_snapshot import DashboardAccountSnapshot
 from ggp_api_coalescer import KeyedSingleFlight
 from ggp_management_events import TradeManagementEventLog
 from ggp_telegram import TelegramNotifier
@@ -1175,6 +1176,78 @@ def get_free_balance_safe():
     bal = get_free_balance()
     cache_set("free_balance", bal)
     return bal
+
+
+# Dashboard requests read this snapshot only; exchange I/O runs on its own worker.
+DASHBOARD_ACCOUNT_SNAPSHOT = DashboardAccountSnapshot()
+_DASHBOARD_ACCOUNT_THREAD = None
+_DASHBOARD_ACCOUNT_THREAD_LOCK = threading.Lock()
+_DASHBOARD_ACCOUNT_STOP = threading.Event()
+
+
+def _optional_usdt_value(bucket):
+    if not isinstance(bucket, dict):
+        return None
+    value = bucket.get("USDT")
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def refresh_dashboard_account_snapshot():
+    if PAPER_MODE:
+        balance = _optional_usdt_value({"USDT": paper.get("balance")})
+        return DASHBOARD_ACCOUNT_SNAPSHOT.update(
+            balance, balance, source="PAPER"
+        )
+    raw = safe_api_call(ex.fetch_balance)
+    if not isinstance(raw, dict):
+        raise RuntimeError("BingX fetch_balance returned no usable account snapshot")
+    balance = _optional_usdt_value(raw.get("total"))
+    free_balance = _optional_usdt_value(raw.get("free"))
+    if balance is None and free_balance is None:
+        raise RuntimeError("BingX balance response is missing total/free USDT values")
+    return DASHBOARD_ACCOUNT_SNAPSHOT.update(
+        balance, free_balance, source="BINGX_FUTURES"
+    )
+
+
+def _dashboard_account_snapshot_worker():
+    while not _DASHBOARD_ACCOUNT_STOP.is_set():
+        try:
+            refresh_dashboard_account_snapshot()
+        except Exception as exc:
+            DASHBOARD_ACCOUNT_SNAPSHOT.mark_error(
+                f"{type(exc).__name__}: {str(exc)[:180]}"
+            )
+            log_execution(
+                f"[ACCOUNT_SNAPSHOT] refresh failed: {type(exc).__name__}: {exc}",
+                "WARN", debounce_key="dashboard_account_snapshot_error", debounce_sec=60
+            )
+        _DASHBOARD_ACCOUNT_STOP.wait(15.0)
+
+
+def start_dashboard_account_snapshot_worker():
+    global _DASHBOARD_ACCOUNT_THREAD
+    with _DASHBOARD_ACCOUNT_THREAD_LOCK:
+        if _DASHBOARD_ACCOUNT_THREAD is not None and _DASHBOARD_ACCOUNT_THREAD.is_alive():
+            return False
+        _DASHBOARD_ACCOUNT_STOP.clear()
+        _DASHBOARD_ACCOUNT_THREAD = threading.Thread(
+            target=_dashboard_account_snapshot_worker,
+            daemon=True,
+            name="dashboard_account_snapshot",
+        )
+        _DASHBOARD_ACCOUNT_THREAD.start()
+        return True
+
+
+def get_dashboard_account_snapshot():
+    if PAPER_MODE and DASHBOARD_ACCOUNT_SNAPSHOT.snapshot().get("status") == "NOT_STARTED":
+        refresh_dashboard_account_snapshot()
+    return DASHBOARD_ACCOUNT_SNAPSHOT.snapshot()
 
 
 def get_available_balance_snapshot(max_age_sec=15.0):
@@ -10177,8 +10250,10 @@ def decision_feed():
 @app.route("/data")
 def data():
     try:
-        bal = get_balance_safe()
-        free_bal = get_free_balance_safe()
+        # HTTP dashboard polling must never synchronously call BingX.
+        account_snapshot = get_dashboard_account_snapshot()
+        bal = account_snapshot.get("balance")
+        free_bal = account_snapshot.get("free_balance")
         avail_margin = free_bal
         mode = "LIVE" if MODE_LIVE else "PAPER"
         DASHBOARD_STATE["account"]["balance"] = bal
@@ -10272,6 +10347,7 @@ def data():
         payload = {
             "balance": bal,
             "free_balance": free_bal,
+            "account_snapshot": account_snapshot,
             "avail_margin": avail_margin,
             "mode": mode,
             "stats": DASHBOARD_STATE["stats"],
@@ -10280,7 +10356,7 @@ def data():
             "errors": DASHBOARD_STATE["errors"][-10:],
             "top5": top5,
             "candidates": MEMORY.get("top_candidates", []),
-            "scanned_count": len(MEMORY.get("top_candidates", [])),
+            "scanned_count": int(MEMORY.get("scanned_count", len(MEMORY.get("top_candidates", []))) or 0),
             "last_scan": MEMORY["last_scan"],
             "regime": MEMORY["regime"],
             "health": health,
@@ -11444,7 +11520,8 @@ def main_loop_sniper():
         log_execution(f"Markets loaded", "INFO")
     except Exception as e:
         log_execution(f"Failed to load markets: {e}", "ERROR")
-    tg_start(get_balance_safe(), "LIVE" if MODE_LIVE else "PAPER")
+    start_dashboard_account_snapshot_worker()
+    tg_start(get_dashboard_account_snapshot().get("balance"), "LIVE" if MODE_LIVE else "PAPER")
     if dispatch_scanner_task("global_discovery", run_global_discovery_scanner):
         last_scan = time.time()
         log_execution("[SCANNER_1] Initial bounded global discovery dispatched", "INFO")
