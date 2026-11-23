@@ -30,6 +30,9 @@ an explicit dashboard setting.
   missing or stale supervisor is not reported as runtime-ready.
 - Gunicorn uses one worker because a trading engine must have one process owner;
   request concurrency is provided by its eight HTTP threads.
+- Keep the Render service at exactly one instance. The OS file lock coordinates
+  processes on the same host; it is not a distributed lock across separate
+  Render instances with separate filesystems.
 
 ## Safety
 
