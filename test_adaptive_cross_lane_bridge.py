@@ -117,6 +117,7 @@ def test_live_adaptive_gate_explicitly_allows_only_confirmed_impulse_mode():
     execute_start = source.index("def execute_entry(")
     execute_end = source.find("\\ndef ", execute_start + 1)
     execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
+    execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
     execute_end = source.find("\ndef ", execute_start + 1)
     execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
     assert '"EMA915_VWAP_IMPULSE_VALID"' in execute
