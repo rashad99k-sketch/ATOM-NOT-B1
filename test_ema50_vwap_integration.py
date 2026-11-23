@@ -103,7 +103,7 @@ def test_watchlist_candidate_priority_uses_directional_cross_and_ema_vwap_entry_
     execute_end = bot_source.index("\ndef dynamic_spread_tolerance(", execute_start)
     execute = bot_source[execute_start:execute_end]
     assert "EMA915_VWAP_LOCATION_FIRST" in execute
-    assert "institutional analysis is location-only" in execute
+    assert "institutional engines are location-only" in execute
     assert "causal_zone:" not in execute
     assert "No liquidity sweep" not in execute
     assert "Legacy path ADX" not in execute
