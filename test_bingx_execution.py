@@ -26,6 +26,7 @@ class FakeExchange:
         self.open_orders = open_orders or []
         self.leverage = leverage
         self.create_calls = []
+        self.cancel_calls = []
         self.mode_calls = 0
 
     def fetch_position_mode(self, symbol=None):
@@ -49,6 +50,11 @@ class FakeExchange:
         return self.order
 
     def fetch_order(self, order_id, symbol, params=None):
+        return self.order
+
+    def cancel_order(self, order_id, symbol, params=None):
+        self.cancel_calls.append((order_id, symbol, params or {}))
+        self.order = {**self.order, "status": "canceled"}
         return self.order
 
     def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
@@ -152,6 +158,9 @@ def test_partial_fill_is_not_marked_active_or_complete():
     assert result.state is ExecutionState.PARTIAL_FILL
     assert result.filled_qty == 1
     assert result.remaining_qty == 1
+    assert exchange.cancel_calls == [("ex-p", "BTC/USDT:USDT", {})]
+    assert "remainder_cancel=VERIFIED" in result.reason
+    assert result.raw_order["status"] == "canceled"
 
 
 def test_rejected_order_is_not_a_position():
@@ -467,3 +476,17 @@ def test_native_sl_does_not_accept_price_beyond_exchange_quantization_delta():
         trigger_price=8.223214285714286, required_qty=1,
         price_tolerance_abs=0.000214285715,
     )
+
+
+def test_partial_fill_without_cancel_capability_is_execution_uncertain_but_preserves_fill():
+    class CannotCancel(FakeExchange):
+        cancel_order = None
+
+    exchange = CannotCancel(order={"id": "ex-p-open", "status": "open", "filled": 1.0,
+                                   "remaining": 1.0, "average": 100.0})
+    result = TradeExecutionService(exchange).submit_market_entry(
+        symbol="BTC/USDT:USDT", side="BUY", quantity=2, trade_id="t-partial-no-cancel")
+    assert result.state is ExecutionState.EXECUTION_UNCERTAIN
+    assert result.filled_qty == 1.0
+    assert result.remaining_qty == 1.0
+    assert "remainder_cancel=UNVERIFIED" in result.reason

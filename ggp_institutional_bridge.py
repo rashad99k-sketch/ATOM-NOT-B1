@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
 import math
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from roro_confluence import (
     classify_liquidity, find_causal_order_block, LiquidityEvent,
     validate_adaptive_ema9_vwap_entry_gate,
     validate_ema915_vwap_pullback_entry_gate,
+    validate_ema915_vwap_location_first_entry_gate,
 )
 from ggp_market_intelligence import (build_intelligence_decision, classify_price_pattern,
                                      build_support_resistance_zones, validate_order_block_zone)
@@ -552,11 +554,116 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     side = str(side or "").upper()
     if side not in {"BUY", "SELL"}:
         return {"symbol": canonical_symbol(symbol), "decision_state": "REJECTED", "rejection_reason": "invalid_side"}
-    context = _build_context(closed, side)
-    rev = REVERSAL.analyze(symbol, side, closed, context=context)
-    cont = CONTINUATION.analyze(symbol, side, closed, context=context)
-    decision = AUTHORITY.decide(rev, cont, risk_ok=True)
+    diagnostics_errors = []
+    try:
+        context = _build_context(closed, side)
+    except Exception as context_exc:
+        diagnostics_errors.append(f"context:{type(context_exc).__name__}")
+        try:
+            fallback_atr = float(_atr(closed))
+            fallback_price = float(closed.close.iloc[-1])
+        except Exception:
+            fallback_atr, fallback_price = 0.0, 0.0
+        if not (np.isfinite(fallback_atr) and fallback_atr > 0
+                and np.isfinite(fallback_price) and fallback_price > 0):
+            return {
+                "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+                "decision_state": DecisionState.REJECTED.value,
+                "decision_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+                "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+            }
+        context = {
+            "atr": fallback_atr, "price": fallback_price,
+            "regime": SimpleNamespace(state="UNKNOWN", direction="NEUTRAL"),
+            "structure": {"confirmed": False, "direction": "UNKNOWN", "bos": None, "mss": None,
+                          "swing_high": None, "swing_low": None},
+            "liquidity": SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
+                                         confidence=0.0, reasons=[]),
+            "order_block": None, "fvg": None,
+            "support_resistance": {"status": "UNKNOWN", "supports": [], "resistances": []},
+            "support_resistance_aligned": False,
+            "volume_ratio": 0.0, "volume_confirmed": False,
+            "golden_zone": {"state": "UNKNOWN", "score": 0.0},
+        }
+    if context.get("regime") is None:
+        context["regime"] = SimpleNamespace(state="UNKNOWN", direction="NEUTRAL")
+    elif isinstance(context.get("regime"), dict):
+        context["regime"] = SimpleNamespace(**context["regime"])
+    if not isinstance(context.get("structure"), dict):
+        context["structure"] = {"confirmed": False, "direction": "UNKNOWN", "bos": None,
+                                "mss": None, "swing_high": None, "swing_low": None}
+    if context.get("liquidity") is None:
+        context["liquidity"] = SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
+                                               confidence=0.0, reasons=[])
+    elif isinstance(context.get("liquidity"), dict):
+        context["liquidity"] = SimpleNamespace(**context["liquidity"])
+    context.setdefault("order_block", None)
+    context.setdefault("fvg", None)
+    if not isinstance(context.get("support_resistance"), dict):
+        context["support_resistance"] = {"status": "UNKNOWN", "supports": [], "resistances": []}
+    context.setdefault("support_resistance_aligned", False)
+    context.setdefault("volume_ratio", 0.0)
+    context.setdefault("volume_confirmed", False)
+    if not isinstance(context.get("golden_zone"), dict):
+        context["golden_zone"] = {"state": "UNKNOWN", "score": 0.0}
+    try:
+        if not (np.isfinite(float(context.get("atr") or 0)) and float(context.get("atr") or 0) > 0):
+            context["atr"] = float(_atr(closed))
+        if not (np.isfinite(float(context.get("price") or 0)) and float(context.get("price") or 0) > 0):
+            context["price"] = float(closed.close.iloc[-1])
+    except Exception as context_value_exc:
+        diagnostics_errors.append(f"context_values:{type(context_value_exc).__name__}")
+    try:
+        if not (np.isfinite(float(context.get("atr") or 0)) and float(context.get("atr") or 0) > 0
+                and np.isfinite(float(context.get("price") or 0)) and float(context.get("price") or 0) > 0):
+            return {
+                "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+                "decision_state": DecisionState.REJECTED.value,
+                "decision_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+                "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+            }
+    except Exception:
+        return {
+            "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+            "decision_state": DecisionState.REJECTED.value,
+            "decision_reason": "institutional_context_failed_and_atr_unavailable",
+            "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+            "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+            "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+        }
+    try:
+        rev = REVERSAL.analyze(symbol, side, closed, context=context)
+    except Exception as rev_exc:
+        diagnostics_errors.append(f"reversal:{type(rev_exc).__name__}")
+        rev = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="reversal_diagnostics_unavailable", score=0.0,
+        )
+    try:
+        cont = CONTINUATION.analyze(symbol, side, closed, context=context)
+    except Exception as cont_exc:
+        diagnostics_errors.append(f"continuation:{type(cont_exc).__name__}")
+        cont = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="continuation_diagnostics_unavailable", score=0.0,
+        )
+    try:
+        decision = AUTHORITY.decide(rev, cont, risk_ok=True)
+    except Exception as authority_exc:
+        diagnostics_errors.append(f"authority:{type(authority_exc).__name__}")
+        decision = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="institutional_authority_diagnostics_unavailable", score=0.0,
+        )
     reg, liq, ob, fvg = context["regime"], context["liquidity"], context["order_block"], context["fvg"]
+    institutional_diagnostics_available = not diagnostics_errors
     ob_state = "UNKNOWN"
     if isinstance(ob, dict):
         validation = ob.get("validation") if isinstance(ob.get("validation"), dict) else {}
@@ -582,117 +689,128 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
                      and ob_state not in ("MITIGATED", "INVALIDATED"))
         except (TypeError, ValueError):
             ob_ok = False
-    fvg_ok = _fvg_matches_side(fvg, side)
+    try:
+        fvg_ok = _fvg_matches_side(fvg, side)
+    except Exception as fvg_exc:
+        diagnostics_errors.append(f"fvg:{type(fvg_exc).__name__}")
+        fvg_ok = False
+        institutional_diagnostics_available = False
     sr_context = context.get("support_resistance") if isinstance(context.get("support_resistance"), dict) else {}
     sr_key = "supports" if side == "BUY" else "resistances"
-    sr_aligned_zone = next((zone for zone in sr_context.get(sr_key, [])
-                            if isinstance(zone, dict)
-                            and str(zone.get("status") or "").upper() == "CONFIRMED"
-                            and float(zone.get("distance_atr", 999) or 999) <= 1.5
-                            and float(zone.get("strength", 0) or 0) >= 5.0), None)
+    try:
+        sr_aligned_zone = next((zone for zone in (sr_context.get(sr_key) or [])
+                                if isinstance(zone, dict)
+                                and str(zone.get("status") or "").upper() == "CONFIRMED"
+                                and float(zone.get("distance_atr", 999) or 999) <= 1.5
+                                and float(zone.get("strength", 0) or 0) >= 5.0), None)
+    except (TypeError, ValueError, OverflowError):
+        sr_aligned_zone = None
     sr_aligned = sr_aligned_zone is not None
     d, golden = _decision_result(decision), context["golden_zone"]
 
-    # Complement the existing RORO engines with an executable EMA9/Session-VWAP
-    # lane.  It still requires a validated causal location plus directional
-    # structure or a matching liquidity event; a crossover by itself is never
-    # enough to manufacture a trade.
-    adaptive_gate = {
-        "ready": False, "decision_state": "WAIT", "entry_mode": "WAIT",
-        "reason": "adaptive_cross_not_evaluated",
+    # EMA9/EMA15 + Session VWAP is the only entry-pattern authority.
+    # Institutional engines remain active as diagnostics and location providers;
+    # they do not require sweep/MSS/BOS/OB approval for a valid EMA setup.
+    institutional_score = float(getattr(decision, "score", 0.0) or 0.0)
+    location_context = {
+        "support_resistance": context.get("support_resistance", {}),
+        "order_block": ob if isinstance(ob, dict) else {},
+        "fvg": fvg if isinstance(fvg, dict) else {},
+        "supply_zones": context.get("supply_zones", []),
+        "demand_zones": context.get("demand_zones", []),
+        "zones": context.get("zones", []),
     }
-    adaptive_zone = None
-    adaptive_zone_source = None
-    adaptive_zone_available_ts = None
-    if ob_ok and isinstance(ob, dict):
-        adaptive_zone = (float(ob.get("low", 0) or 0), float(ob.get("high", 0) or 0))
-        adaptive_zone_source = "ORDER_BLOCK"
-        adaptive_zone_available_ts = ob.get("impulse_timestamp", ob.get("timestamp"))
-    elif fvg_ok and isinstance(fvg, dict):
-        adaptive_zone = (float(fvg.get("lower", 0) or 0), float(fvg.get("upper", 0) or 0))
-        adaptive_zone_source = "FVG"
-        adaptive_zone_available_ts = fvg.get("timestamp")
-    elif sr_aligned and isinstance(sr_aligned_zone, dict):
-        adaptive_zone = (float(sr_aligned_zone.get("low", 0) or 0), float(sr_aligned_zone.get("high", 0) or 0))
-        adaptive_zone_source = "SUPPORT" if side == "BUY" else "RESISTANCE"
-        adaptive_zone_available_ts = sr_aligned_zone.get("source_timestamp", sr_aligned_zone.get("timestamp"))
-    if (adaptive_zone and not (0 < adaptive_zone[0] < adaptive_zone[1])):
-        adaptive_zone = None
-        adaptive_zone_source = None
+    try:
+        ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
+        adaptive_gate = validate_ema915_vwap_location_first_entry_gate(
+            closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
+            now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
+            max_cross_age_bars=8, pullback_lookback_bars=5,
+            max_extension_atr=1.5, location_context=location_context,
+        )
+    except Exception as adaptive_exc:
+        adaptive_gate = {
+            "ready": False, "decision_state": "INVALIDATED", "entry_mode": "WAIT",
+            "reason": f"ema915_location_gate_error:{type(adaptive_exc).__name__}",
+        }
 
-    expected_structure = "BULLISH" if side == "BUY" else "BEARISH"
-    expected_bos = "BULLISH_BOS" if side == "BUY" else "BEARISH_BOS"
-    structure = context.get("structure") if isinstance(context.get("structure"), dict) else {}
-    structure_confirmed = bool(
-        structure.get("confirmed")
-        and (str(structure.get("direction") or "").upper() == expected_structure
-             or str(structure.get("bos") or "").upper() == expected_bos)
-    )
-    liquidity_confirmed = bool(
-        str(liq_name).upper() in {"SWEEP", "GRAB", "FAILED_AUCTION"}
-        and str(liq_direction).upper() == expected_structure
-    )
-    if adaptive_zone is not None:
-        try:
-            ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
-            adaptive_gate = validate_ema915_vwap_pullback_entry_gate(
-                closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
-                now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
-                cross_lookback_candles=8, pullback_lookback_candles=5,
-                max_extension_atr=1.5, setup_mode="CONTINUATION",
-                entry_zone_low=adaptive_zone[0], entry_zone_high=adaptive_zone[1],
-                entry_zone_available_timestamp=adaptive_zone_available_ts,
-            )
-        except Exception as adaptive_exc:
-            adaptive_gate = {
-                "ready": False, "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED",
-                "reason": f"adaptive_gate_error:{type(adaptive_exc).__name__}",
-            }
+    adaptive_zone = None
+    adaptive_zone_source = "EMA915_VWAP_BAND"
+    adaptive_zone_available_ts = adaptive_gate.get("pullback_timestamp")
+    if adaptive_gate.get("entry_zone_low") is not None and adaptive_gate.get("entry_zone_high") is not None:
+        adaptive_zone = (float(adaptive_gate["entry_zone_low"]), float(adaptive_gate["entry_zone_high"]))
 
     adaptive_stop = None
-    adaptive_stop_reason = "adaptive_location_or_structure_not_confirmed"
-    if (adaptive_gate.get("ready") is True and adaptive_zone is not None
-            and (structure_confirmed or liquidity_confirmed)):
-        # Invalidation is anchored to the causal zone boundary, then buffered by
-        # the existing structural stop engine. Position sizing still applies its
-        # own max-risk cap; this path does not alter sizing or leverage.
-        structural_extreme = adaptive_zone[0] if side == "BUY" else adaptive_zone[1]
+    adaptive_stop_reason = "pullback_structure_not_confirmed"
+    gate_ready = adaptive_gate.get("ready") is True
+    if gate_ready:
+        structural_extreme = adaptive_gate.get("pullback_low") if side == "BUY" else adaptive_gate.get("pullback_high")
         adaptive_stop, adaptive_stop_reason = StructuralStopLossEngine.calculate(
             side, "EMA9_VWAP_ADAPTIVE", float(context["price"]),
             float(structural_extreme), float(context["atr"]),
         )
-        if adaptive_stop is not None:
-            adaptive_evidence = [
-                "ema9_ema15_cross_confirmed",
-                f"ema915_pullback_rejection_break:{adaptive_gate.get('entry_mode')}",
-                f"adaptive_entry:{adaptive_gate.get('entry_mode')}",
-                f"causal_zone:{adaptive_zone_source}",
-                "structure_confirmation:directional" if structure_confirmed else "liquidity_confirmation:directional_sweep",
-            ]
-            if context.get("volume_confirmed"):
-                adaptive_evidence.append("volume_expansion:confirmed")
-            else:
-                adaptive_evidence.append("volume_expansion:not_confirmed_context_only")
-            adaptive_evidence.append(f"ema50_context:{adaptive_gate.get('ema50_alignment', 'UNAVAILABLE')}")
-            adaptive_decision = InstitutionalDecision(
-                state=DecisionState.ENTRY_READY.value,
-                setup_type="EMA9_VWAP_ADAPTIVE",
-                side=side,
-                reason=str(adaptive_gate.get("reason") or "adaptive_cross_entry_ready"),
-                evidence=tuple(adaptive_evidence),
-                rejection_reasons=(),
-                event_id=f"EMA9EMA15VWAP:{canonical_symbol(symbol)}:{adaptive_gate.get('signal_candle_id') or ''}",
-                origin_timestamp=int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1]),
-                invalidation_level=float(adaptive_stop),
-                structural_stop=float(adaptive_stop),
-                score=float(getattr(decision, "score", 0.0) or 0.0),
-            )
-            # A ready, location-first EMA9/VWAP setup may authorize alongside
-            # legacy RORO candidates; a ready RORO setup retains precedence.
-            if decision.state != DecisionState.ENTRY_READY.value:
-                decision = adaptive_decision
-                d = _decision_result(decision)
-    # Explainable mode/entry-behavior classification. This is analytical metadata only;
+        if adaptive_stop is None:
+            gate_ready = False
+            adaptive_gate.update({"ready": False, "decision_state": "WAITING_FOR_CONFIRMATION",
+                                  "reason": f"structural_stop_invalid:{adaptive_stop_reason}"})
+
+    gate_state = str(adaptive_gate.get("decision_state") or "WAITING_FOR_CONFIRMATION")
+    if gate_ready:
+        decision_state = DecisionState.ENTRY_READY.value
+        decision_reason = str(adaptive_gate.get("reason") or "ema915_location_first_entry_ready")
+        decision_evidence = (
+            "closed_ema9_ema15_cross",
+            "session_vwap_directional_alignment",
+            "post_cross_pullback_touch",
+            f"pullback_type:{adaptive_gate.get('pullback_type', 'MICRO_RETEST')}",
+            "separate_directional_rejection_candle",
+            "later_closed_continuation_break",
+            f"location_filter:{adaptive_gate.get('location_status', 'UNKNOWN')}",
+        )
+        rejection_reasons = ()
+        timeframe_label = (
+            f"{TIMEFRAME_SECONDS // 3600}h" if TIMEFRAME_SECONDS % 3600 == 0
+            else f"{TIMEFRAME_SECONDS // 60}m" if TIMEFRAME_SECONDS % 60 == 0
+            else f"{TIMEFRAME_SECONDS}s"
+        )
+        event_id = f"{exchange_symbol(symbol)}:{timeframe_label}:{adaptive_gate.get('signal_candle_id') or ''}"
+        origin_timestamp = int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1])
+        structural_stop = float(adaptive_stop)
+    else:
+        decision_state = {
+            "WAITING_FOR_CROSS": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "WAITING_FOR_PULLBACK": DecisionState.WAITING_FOR_RETEST.value,
+            "WAITING_FOR_REJECTION": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "WAITING_FOR_CONFIRMATION": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "NO_CHASE": DecisionState.NO_CHASE.value,
+            "BLOCKED_BY_LOCATION": DecisionState.NO_CHASE.value,
+            "EXPIRED": DecisionState.EXPIRED.value,
+            "INVALIDATED": DecisionState.INVALIDATED.value,
+        }.get(gate_state, DecisionState.WAITING_FOR_CONFIRMATION.value)
+        decision_reason = str(adaptive_gate.get("reason") or "ema915_setup_pending")
+        decision_evidence = tuple(
+            value for value in (
+                f"cross:{adaptive_gate.get('cross_direction')}",
+                f"stage:{gate_state}",
+                f"location:{adaptive_gate.get('location_status')}",
+            ) if not value.endswith("None")
+        )
+        rejection_reasons = (decision_reason,)
+        event_id = None
+        origin_timestamp = adaptive_gate.get("cross_timestamp")
+        structural_stop = None
+
+    decision = InstitutionalDecision(
+        state=decision_state, setup_type="EMA9_VWAP_ADAPTIVE", side=side,
+        reason=decision_reason, evidence=tuple(decision_evidence),
+        rejection_reasons=tuple(rejection_reasons), event_id=str(event_id or ""),
+        origin_timestamp=int(origin_timestamp) if origin_timestamp else None,
+        invalidation_level=float(structural_stop) if structural_stop else None,
+        structural_stop=float(structural_stop) if structural_stop else None,
+        score=institutional_score,
+    )
+    d = _decision_result(decision)
+        # Explainable mode/entry-behavior classification. This is analytical metadata only;
     # UnifiedEntryAuthority and execute_entry remain the sole entry authorization path.
     _liq_conf = getattr(liq, "confidence", 0.0)
     _disp_atr = None
@@ -701,7 +819,12 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         _disp_atr = abs(float(_last.close) - float(_last.open)) / max(_atr(closed), 1e-12)
     except Exception:
         pass
-    _adx_value = _adx(closed)
+    try:
+        _adx_value = _adx(closed)
+    except Exception as adx_exc:
+        diagnostics_errors.append(f"adx:{type(adx_exc).__name__}")
+        _adx_value = float("nan")
+        institutional_diagnostics_available = False
     # Prefer the causal order block as the primary zone; use a directionally
     # valid, unfilled FVG only when no qualified OB exists.
     _zone_low = _zone_high = None
@@ -715,30 +838,44 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             and np.isfinite(_zone_low) and np.isfinite(_zone_high)
             and 0 < _zone_low < _zone_high):
         _zone_low = _zone_high = None
-    _intelligence = build_intelligence_decision(
-        regime=reg.state, adx=_adx_value,
-        continuation_probability=(float(cont.score) / 100.0 if getattr(cont, "score", None) is not None else None),
-        liquidity_quality=("GOOD" if float(_liq_conf or 0) >= 65.0 else "ADEQUATE" if float(_liq_conf or 0) >= 50.0 else "UNKNOWN"),
-        displacement_atr=_disp_atr,
-        setup_type=decision.setup_type,
-        sweep_confirmed=_sniper_evidence_matches_side(
-            side, liq_name, liq_direction, context["structure"].get("mss"), bool(ob_ok or fvg_ok)
-        ),
-        mss_confirmed=(
-            str(context["structure"].get("mss") or "").upper()
-            == ("BULLISH_CHOCH" if side == "BUY" else "BEARISH_CHOCH")
-        ),
-        causal_zone_valid=bool(ob_ok or fvg_ok),
-        bos_level=(context["structure"].get("swing_high") if side == "BUY" else context["structure"].get("swing_low")),
-        reference_low=_zone_low, reference_high=_zone_high,
-        volatility_atr=(_atr(closed) / float(context["price"]) * 100.0 if float(context["price"] or 0) > 0 else None),
-        data_quality="VALID_CLOSED_CANDLES",
-    ).to_dict()
+    try:
+        _intelligence = build_intelligence_decision(
+            regime=reg.state, adx=_adx_value,
+            continuation_probability=(float(cont.score) / 100.0 if getattr(cont, "score", None) is not None else None),
+            liquidity_quality=("GOOD" if float(_liq_conf or 0) >= 65.0 else "ADEQUATE" if float(_liq_conf or 0) >= 50.0 else "UNKNOWN"),
+            displacement_atr=_disp_atr,
+            setup_type=decision.setup_type,
+            sweep_confirmed=_sniper_evidence_matches_side(
+                side, liq_name, liq_direction, context["structure"].get("mss"), bool(ob_ok or fvg_ok)
+            ),
+            mss_confirmed=(
+                str(context["structure"].get("mss") or "").upper()
+                == ("BULLISH_CHOCH" if side == "BUY" else "BEARISH_CHOCH")
+            ),
+            causal_zone_valid=bool(ob_ok or fvg_ok),
+            bos_level=(context["structure"].get("swing_high") if side == "BUY" else context["structure"].get("swing_low")),
+            reference_low=_zone_low, reference_high=_zone_high,
+            volatility_atr=(_atr(closed) / float(context["price"]) * 100.0 if float(context["price"] or 0) > 0 else None),
+            data_quality="VALID_CLOSED_CANDLES",
+        ).to_dict()
+    except Exception as intelligence_exc:
+        diagnostics_errors.append(f"intelligence:{type(intelligence_exc).__name__}")
+        institutional_diagnostics_available = False
+        _intelligence = {
+            "mode": "UNKNOWN", "entry_behavior": "EMA_VWAP_GATE_ONLY",
+            "confidence": 0.0, "reason_codes": ["INSTITUTIONAL_DIAGNOSTICS_UNAVAILABLE"],
+            "reference_low": None, "reference_high": None,
+        }
     # Chart-pattern recognition is observational metadata based exclusively on
     # the validated closed-candle frame; it cannot authorize or submit orders.
-    _intelligence["price_pattern"] = classify_price_pattern(
-        closed.to_dict("records"), atr=_atr(closed)
-    )
+    try:
+        _intelligence["price_pattern"] = classify_price_pattern(
+            closed.to_dict("records"), atr=_atr(closed)
+        )
+    except Exception as pattern_exc:
+        diagnostics_errors.append(f"pattern:{type(pattern_exc).__name__}")
+        _intelligence["price_pattern"] = "UNKNOWN"
+        institutional_diagnostics_available = False
     return {
         "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol),
         "side": side, "price": context["price"], "market_regime": reg.state,
@@ -753,6 +890,8 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "origin_timestamp": decision.origin_timestamp, "structural_stop": decision.structural_stop,
         "invalidation_level": decision.invalidation_level, "score": float(decision.score),
         "last_updated": time.time(), "last_update": time.time(), "data_quality": "VALID_CLOSED_CANDLES",
+        "institutional_diagnostics_available": bool(institutional_diagnostics_available),
+        "institutional_diagnostics_errors": list(diagnostics_errors),
         "liquidity": {"event": liq_name, "direction": liq_direction, "level": getattr(liq, "level", None),
                       "confidence": getattr(liq, "confidence", 0), "reasons": list(getattr(liq, "reasons", []))},
         "order_block": ob, "order_block_state": ob_state, "fvg": fvg, "golden_zone": golden,
@@ -876,7 +1015,7 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
             0.0 <= cross_age <= cross_max_age
             and bool(proximity.get("cross_fresh", True))
         )
-        # Crosses affect ordering only; structural EntryAuthority remains final.
+        # Crosses affect candidate ordering; the closed-bar EMA/VWAP gate is the entry authority.
         vwap_cross_priority = (
             0.65 if cross_fresh and cross_direction and cross_direction == expected_cross
             else -0.35 if cross_fresh and cross_direction and expected_cross and cross_direction != expected_cross

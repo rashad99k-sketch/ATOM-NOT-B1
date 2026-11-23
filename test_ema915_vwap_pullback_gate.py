@@ -213,19 +213,19 @@ def test_all_execution_paths_use_primary_gate_and_live_last_mile_revalidates():
     execute_start = source.index("def execute_entry(")
     execute_end = source.find("\ndef ", execute_start + 1)
     execute = source[execute_start:execute_end]
-    assert "_validate_adaptive_ema9_vwap_entry_gate(" in execute
-    assert "_validate_ema915_vwap_pullback_entry_gate(" in execute
-    assert 'gate_setup_type == "EMA9_VWAP_ADAPTIVE"' in execute
+    assert "_validate_ema915_vwap_location_first_entry_gate(" in execute
+    assert "_validate_adaptive_ema9_vwap_entry_gate(" not in execute
     assert "_validate_dual_ema_vwap_entry_gate(" not in execute
     open_position = source[source.index("def open_position("):]
     assert "[EMA9_VWAP_FINAL_GATE]" in open_position
-    assert "_validate_adaptive_ema9_vwap_entry_gate(" in open_position
-    assert "_validate_ema915_vwap_pullback_entry_gate(" in open_position
-    assert 'gate_kind == "EMA915_PULLBACK"' in open_position
+    assert "_validate_ema915_vwap_location_first_entry_gate(" in open_position
+    assert "_validate_adaptive_ema9_vwap_entry_gate(" not in open_position
+    assert 'final_gate["gate_kind"] = "EMA915_VWAP_LOCATION_FIRST"' in open_position
     assert "entry_gate_snapshot" in open_position
     assert "submit_market_entry(" in open_position
+    assert "PARTIAL_FILL_RECOVERY_HOLD" in open_position
     scaling = source[source.index("def scaling_logic("):source.index("def council_exit(")]
-    assert "_validate_ema915_vwap_pullback_entry_gate(" in scaling
+    assert "_validate_ema915_vwap_location_first_entry_gate(" in scaling
     assert "EMA915_SCALE_IN_BLOCK" in scaling
     assert scaling.index('STATE["qty"] += actual_scale_qty') < scaling.index("journal.consume_event(event_id, scale_trade_id)")
 
