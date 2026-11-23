@@ -106,4 +106,6 @@ def test_scanner_snapshot_uses_only_defined_adaptive_side_map_and_progress_map()
     assert "_progress_by_stage" not in source
     assert "_ema915_checks" not in source
     assert '"ema9_vwap_adaptive_strategy": _strategy_snapshot' in source
-    assert '"DIRECT_ENTRY": 100' in source
+    assert '"MACRO_PULLBACK_READY"' in source
+    assert '"WAITING_FOR_CONTINUATION_BREAK"' in source
+    assert '"EMA9_EMA15_SESSION_VWAP_PULLBACK"' in source
