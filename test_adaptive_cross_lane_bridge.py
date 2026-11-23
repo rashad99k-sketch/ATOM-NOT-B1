@@ -48,11 +48,15 @@ def _patch_common(monkeypatch, ctx, gate_ready=True):
         state=DecisionState.WAITING_FOR_RETEST.value, setup_type="TREND_CONTINUATION_RETEST",
         side="BUY", reason="waiting_for_legacy_retest", score=0.0,
     ))
-    monkeypatch.setattr(bridge, "validate_adaptive_ema9_vwap_entry_gate", lambda *a, **k: {
-        "ready": gate_ready, "entry_mode": "DIRECT_ENTRY" if gate_ready else "WAIT",
-        "reason": "fresh_cross_direct_location_confirmed" if gate_ready else "waiting_for_micro_pullback",
+    monkeypatch.setattr(bridge, "validate_ema915_vwap_pullback_entry_gate", lambda *a, **k: {
+        "ready": gate_ready, "entry_mode": "MICRO_PULLBACK" if gate_ready else "WAIT",
+        "authorization_state": "EMA915_VWAP_PULLBACK_VALID" if gate_ready else None,
+        "trigger": "EMA9_EMA15_VWAP_PULLBACK",
+        "cross_direction": "BULLISH",
+        "reason": "ema915_cross_vwap_pullback_rejection_then_quality_breakout_confirmed" if gate_ready else "waiting_for_ema_band_or_macro_pullback",
         "cross_timestamp": int(ctx.get("cross_timestamp", 1795132800000)),
-        "ema50_alignment": "OPPOSED", "signal_candle_id": "BUY:1795132800000",
+        "ema9_cross": "BULLISH", "ema50_alignment": "OPPOSED",
+        "signal_candle_id": "BUY:EMA9_EMA15:1795132800000:PULLBACK:1:REJECTION:2:BREAK:3",
     })
 
 
@@ -65,7 +69,8 @@ def test_adaptive_cross_can_authorize_only_with_zone_and_structure_or_liquidity(
     assert result["decision_setup_type"] == "EMA9_VWAP_ADAPTIVE"
     assert result["setup_type"] == "EMA9_VWAP_ADAPTIVE"
     assert result["structural_stop"] < result["price"]
-    assert "ema9_vwap_cross_confirmed" in result["evidence"]
+    assert "ema9_ema15_cross_confirmed" in result["evidence"]
+    assert any(item.startswith("ema915_pullback_rejection_break:") for item in result["evidence"])
     assert any(item.startswith("causal_zone:ORDER_BLOCK") for item in result["evidence"])
 
 
