@@ -75,6 +75,7 @@ def test_wsgi_entrypoint_starts_supervisor_and_procfile_uses_single_worker():
     assert "ggpbot.safe_main_loop" in wsgi
     assert "gunicorn wsgi:app" in procfile
     assert "--workers 1" in procfile
+    assert "--bind 0.0.0.0:$PORT" in procfile
 
 
 def test_runtime_loop_publishes_heartbeat_and_readiness_endpoint():
