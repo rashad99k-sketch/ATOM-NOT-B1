@@ -7,3 +7,4 @@ psutil
 pytest
 python-dotenv
 matplotlib>=3.9,<4
+gunicorn>=23,<24
