@@ -57,7 +57,7 @@
 gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120 --access-logfile - --error-logfile -
 ```
 
-يوصى بتعيين Health Check Path إلى `/runtime-health`. وجود `Procfile` لا يستبدل Start Command صريحًا موجودًا في لوحة Render.
+يوصى بتعيين Health Check Path إلى `/runtime-health`. اضبط عدد Instances في Render على واحد؛ قفل نظام التشغيل محلي لكل مضيف وليس قفلًا موزعًا بين مضيفين. وجود `Procfile` لا يستبدل Start Command صريحًا موجودًا في لوحة Render.
 
 ## 7. حدود التحقق
 
