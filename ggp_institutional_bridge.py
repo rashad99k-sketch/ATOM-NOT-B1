@@ -21,6 +21,7 @@ from roro_opportunity_pipeline import validate_closed_frame, classify_regime, co
 from roro_confluence import (
     classify_liquidity, find_causal_order_block, LiquidityEvent,
     validate_adaptive_ema9_vwap_entry_gate,
+    validate_ema915_vwap_pullback_entry_gate,
 )
 from ggp_market_intelligence import (build_intelligence_decision, classify_price_pattern,
                                      build_support_resistance_zones, validate_order_block_zone)
@@ -324,6 +325,7 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         ("scanner_v2_sell", memory.get("scanner_v2_sell", []), "SELL"),
         ("radar_watchlist", memory.get("radar_watchlist", []), None),
         ("m15_setup_watchlist", memory.get("m15_setup_watchlist", []), None),
+        ("ema9_vwap_proximity_scanner", memory.get("ema9_vwap_proximity_scanner", []), None),
         ("radar_top5", memory.get("radar_top5", []), None),
         ("top_candidates", memory.get("top_candidates", []), None),
         ("candidates", memory.get("candidates", []), None),
@@ -334,6 +336,39 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         for item in values:
             if not isinstance(item, dict) or not item.get("symbol"):
                 continue
+            if source == "ema9_vwap_proximity_scanner":
+                strategy = item.get("ema9_vwap_adaptive_strategy")
+                if not isinstance(strategy, dict):
+                    strategy = item.get("ema915_vwap_strategy")
+                if not isinstance(strategy, dict):
+                    continue
+                active_side = str(strategy.get("active_side") or "").upper()
+                active_stage = str(strategy.get("stage") or "").upper()
+                try:
+                    observed_at = float(item.get("updated_at") or strategy.get("observed_at") or 0.0)
+                    timeframe_seconds = float(item.get("timeframe_seconds") or strategy.get("timeframe_seconds") or 900.0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not (math.isfinite(observed_at) and math.isfinite(timeframe_seconds) and timeframe_seconds > 0):
+                    continue
+                age_seconds = time.time() - observed_at
+                max_observation_age = max(2.0 * timeframe_seconds, 1800.0)
+                allowed_stages = {
+                    "WAITING_FOR_PULLBACK", "WAITING_FOR_REJECTION",
+                    "WAITING_FOR_CONTINUATION_BREAK", "WAITING_FOR_RECLAIM",
+                    "WAITING_FOR_ALIGNMENT", "MICRO_PULLBACK_READY", "RETEST_READY",
+                    "MACRO_PULLBACK_READY",
+                }
+                if (
+                    active_side not in {"BUY", "SELL"}
+                    or active_stage not in allowed_stages
+                    or item.get("cross_fresh") is not True
+                    or str(item.get("data_quality") or "").upper() != "CLOSED_CANDLES"
+                    or observed_at <= 0
+                    or age_seconds < -30.0
+                    or age_seconds > max_observation_age
+                ):
+                    continue
             original = str(item["symbol"]).strip()
             key = canonical_symbol(original)
             exchange = exchange_symbol(original)
@@ -346,6 +381,8 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             if source not in entry["sources"]:
                 entry["sources"].append(source)
             side = str(item.get("side") or item.get("rf_signal") or "").upper()
+            if source == "ema9_vwap_proximity_scanner":
+                side = str((item.get("ema9_vwap_adaptive_strategy") or item.get("ema915_vwap_strategy") or {}).get("active_side") or "").upper()
             if side not in {"BUY", "SELL"}:
                 side = str(item.get("side_hint") or implied_side or "").upper()
             if side in {"BUY", "SELL"}:
@@ -566,15 +603,19 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     }
     adaptive_zone = None
     adaptive_zone_source = None
+    adaptive_zone_available_ts = None
     if ob_ok and isinstance(ob, dict):
         adaptive_zone = (float(ob.get("low", 0) or 0), float(ob.get("high", 0) or 0))
         adaptive_zone_source = "ORDER_BLOCK"
+        adaptive_zone_available_ts = ob.get("impulse_timestamp", ob.get("timestamp"))
     elif fvg_ok and isinstance(fvg, dict):
         adaptive_zone = (float(fvg.get("lower", 0) or 0), float(fvg.get("upper", 0) or 0))
         adaptive_zone_source = "FVG"
+        adaptive_zone_available_ts = fvg.get("timestamp")
     elif sr_aligned and isinstance(sr_aligned_zone, dict):
         adaptive_zone = (float(sr_aligned_zone.get("low", 0) or 0), float(sr_aligned_zone.get("high", 0) or 0))
         adaptive_zone_source = "SUPPORT" if side == "BUY" else "RESISTANCE"
+        adaptive_zone_available_ts = sr_aligned_zone.get("source_timestamp", sr_aligned_zone.get("timestamp"))
     if (adaptive_zone and not (0 < adaptive_zone[0] < adaptive_zone[1])):
         adaptive_zone = None
         adaptive_zone_source = None
@@ -594,12 +635,13 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     if adaptive_zone is not None:
         try:
             ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
-            adaptive_gate = validate_adaptive_ema9_vwap_entry_gate(
+            adaptive_gate = validate_ema915_vwap_pullback_entry_gate(
                 closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
                 now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
-                lookback_candles=5,
+                cross_lookback_candles=8, pullback_lookback_candles=5,
+                max_extension_atr=1.5, setup_mode="CONTINUATION",
                 entry_zone_low=adaptive_zone[0], entry_zone_high=adaptive_zone[1],
-                max_chase_atr=1.5,
+                entry_zone_available_timestamp=adaptive_zone_available_ts,
             )
         except Exception as adaptive_exc:
             adaptive_gate = {
@@ -621,7 +663,8 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         )
         if adaptive_stop is not None:
             adaptive_evidence = [
-                "ema9_vwap_cross_confirmed",
+                "ema9_ema15_cross_confirmed",
+                f"ema915_pullback_rejection_break:{adaptive_gate.get('entry_mode')}",
                 f"adaptive_entry:{adaptive_gate.get('entry_mode')}",
                 f"causal_zone:{adaptive_zone_source}",
                 "structure_confirmation:directional" if structure_confirmed else "liquidity_confirmation:directional_sweep",
@@ -638,7 +681,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
                 reason=str(adaptive_gate.get("reason") or "adaptive_cross_entry_ready"),
                 evidence=tuple(adaptive_evidence),
                 rejection_reasons=(),
-                event_id=f"EMA9VWAP:{canonical_symbol(symbol)}:{side}:{int(adaptive_gate.get('cross_timestamp') or 0)}",
+                event_id=f"EMA9EMA15VWAP:{canonical_symbol(symbol)}:{adaptive_gate.get('signal_candle_id') or ''}",
                 origin_timestamp=int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1]),
                 invalidation_level=float(adaptive_stop),
                 structural_stop=float(adaptive_stop),
@@ -705,6 +748,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "decision_reason": decision.reason, "evidence": d.get("evidence", []),
         "adaptive_entry_gate": dict(adaptive_gate),
         "adaptive_entry_location_source": adaptive_zone_source,
+        "adaptive_entry_location_timestamp": adaptive_zone_available_ts,
         "rejection_reasons": d.get("rejection_reasons", []), "event_id": decision.event_id,
         "origin_timestamp": decision.origin_timestamp, "structural_stop": decision.structural_stop,
         "invalidation_level": decision.invalidation_level, "score": float(decision.score),

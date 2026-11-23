@@ -6173,20 +6173,48 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
             log_execution(f"[EMA915_FINAL_GATE] BLOCKED {sym}: approved entry snapshot missing", "ERROR")
             return None
         latest_gate_frame = _integration_fetch_frame(sym)
-        final_gate = _validate_adaptive_ema9_vwap_entry_gate(
-            latest_gate_frame, side, ema,
-            timeframe_seconds=_roro_timeframe_seconds(str(
-                management_state.get("entry_gate_timeframe") or INTERVAL
-            )),
-            now_ms=int(time.time() * 1000), lookback_candles=5,
-            current_price=price,
-            entry_zone_low=management_state.get("entry_zone_low"),
-            entry_zone_high=management_state.get("entry_zone_high"),
-            max_chase_atr=1.5,
-        )
+        gate_kind = str(
+            management_state.get("entry_gate_kind")
+            or ("EMA915_PULLBACK" if str(gate_snapshot.get("trigger") or "").startswith("EMA9_EMA15") else "ADAPTIVE_EMA9_VWAP")
+        ).upper()
+        gate_timeframe_seconds = _roro_timeframe_seconds(str(
+            management_state.get("entry_gate_timeframe") or INTERVAL
+        ))
+        if gate_kind == "EMA915_PULLBACK":
+            final_gate = _validate_ema915_vwap_pullback_entry_gate(
+                latest_gate_frame, side, ema,
+                timeframe_seconds=gate_timeframe_seconds,
+                now_ms=int(time.time() * 1000),
+                cross_lookback_candles=8, pullback_lookback_candles=5,
+                current_price=price, max_extension_atr=1.5,
+                setup_mode=str(management_state.get("entry_gate_setup_mode") or gate_snapshot.get("setup_mode") or "CONTINUATION"),
+                institutional_evidence=list(management_state.get("entry_gate_evidence") or []),
+                institutional_event_id=management_state.get("entry_gate_event_id"),
+                institutional_origin_timestamp=management_state.get("entry_gate_origin_timestamp"),
+                entry_zone_low=management_state.get("entry_zone_low"),
+                entry_zone_high=management_state.get("entry_zone_high"),
+                entry_zone_available_timestamp=management_state.get("entry_zone_available_timestamp"),
+            )
+            final_gate["gate_kind"] = "EMA915_PULLBACK"
+        else:
+            final_gate = _validate_adaptive_ema9_vwap_entry_gate(
+                latest_gate_frame, side, ema,
+                timeframe_seconds=gate_timeframe_seconds,
+                now_ms=int(time.time() * 1000), lookback_candles=5,
+                current_price=price,
+                entry_zone_low=management_state.get("entry_zone_low"),
+                entry_zone_high=management_state.get("entry_zone_high"),
+                max_chase_atr=1.5,
+            )
+            final_gate["gate_kind"] = "ADAPTIVE_EMA9_VWAP"
         if (not final_gate.get("ready")
+                or final_gate.get("gate_kind") != gate_snapshot.get("gate_kind", gate_kind)
                 or final_gate.get("signal_candle_id") != gate_snapshot.get("signal_candle_id")
-                or final_gate.get("entry_mode") != gate_snapshot.get("entry_mode")):
+                or final_gate.get("entry_mode") != gate_snapshot.get("entry_mode")
+                or (
+                    gate_kind == "EMA915_PULLBACK"
+                    and final_gate.get("authorization_state") != gate_snapshot.get("authorization_state")
+                )):
             log_execution(
                 f"[EMA9_VWAP_FINAL_GATE] BLOCKED {sym} {side}: "
                 f"decision={final_gate.get('entry_mode')} reason={final_gate.get('reason')} "
@@ -6618,8 +6646,9 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         return False
     trade_id = uuid.uuid4().hex
     institutional_entry_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT") or {}
-    # EMA9/Session-VWAP is the primary closed-candle trigger.  EMA50 remains
-    # soft context; the adaptive gate decides direct, micro-pullback or retest.
+    # EMA9/EMA15 cross starts this adaptive lane; Session VWAP is directional
+    # context. The gate requires a micro pullback, causal-zone retest, or EMA50
+    # macro pullback, followed by a separate rejection and quality break.
     gate_setup_type = str(institutional_entry_ctx.get("setup_type") or "").strip().upper()
     gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
     gate_evidence = list(institutional_entry_ctx.get("evidence") or [])
@@ -6634,14 +6663,29 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         if gate_frame is None:
             gate_frame = _integration_fetch_frame(symbol)
             gate_frame_source = "SHARED_SCANNER_FRAME_FALLBACK"
-        gate_result = _validate_adaptive_ema9_vwap_entry_gate(
-            gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
-            now_ms=int(time.time() * 1000), lookback_candles=5,
-            current_price=float(price),
-            entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
-            entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
-            max_chase_atr=1.5,
-        )
+        if gate_setup_type == "EMA9_VWAP_ADAPTIVE":
+            gate_result = _validate_ema915_vwap_pullback_entry_gate(
+                gate_frame, side, ema,
+                timeframe_seconds=_roro_timeframe_seconds(gate_tf),
+                now_ms=int(time.time() * 1000),
+                cross_lookback_candles=8, pullback_lookback_candles=5,
+                current_price=float(price), max_extension_atr=1.5,
+                setup_mode="CONTINUATION",
+                entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
+                entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
+                entry_zone_available_timestamp=institutional_entry_ctx.get("entry_zone_available_timestamp"),
+            )
+            gate_result["gate_kind"] = "EMA915_PULLBACK"
+        else:
+            gate_result = _validate_adaptive_ema9_vwap_entry_gate(
+                gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
+                now_ms=int(time.time() * 1000), lookback_candles=5,
+                current_price=float(price),
+                entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
+                entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
+                max_chase_atr=1.5,
+            )
+            gate_result["gate_kind"] = "ADAPTIVE_EMA9_VWAP"
         gate_result["setup_mode"] = gate_setup_mode
         gate_result["frame_source"] = gate_frame_source
     except Exception as gate_exc:
@@ -6664,7 +6708,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             f"VWAP={gate_result.get('vwap')} EMA50={gate_result.get('ema50')} "
             f"EMA50_alignment={gate_result.get('ema50_alignment')} "
             f"source={gate_result.get('frame_source', gate_frame_source)} "
-            f"cross={gate_result.get('ema9_cross')} cross_ts={gate_result.get('cross_timestamp')} "
+            f"cross={gate_result.get('ema9_cross') or gate_result.get('cross_direction')} cross_ts={gate_result.get('cross_timestamp')} "
             f"zone={gate_result.get('entry_zone_low')}-{gate_result.get('entry_zone_high')} "
             f"closed_ts={gate_result.get('latest_closed_timestamp')} "
             f"data_age_sec={gate_result.get('data_age_seconds')}",
@@ -6921,8 +6965,13 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             elif setup == "EMA9_VWAP_ADAPTIVE":
                 valid = bool(
                     gate_result.get("ready") is True
-                    and gate_result.get("entry_mode") in {"DIRECT_ENTRY", "MICRO_PULLBACK", "RETEST_ENTRY"}
-                    and any(ev == "ema9_vwap_cross_confirmed" for ev in evidence)
+                    and gate_result.get("gate_kind") == "EMA915_PULLBACK"
+                    and gate_result.get("authorization_state") in {
+                        "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_RETEST_VALID",
+                        "EMA915_VWAP_MACRO_PULLBACK_VALID"
+                    }
+                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "RETEST", "MACRO_PULLBACK"}
+                    and any(ev == "ema9_ema15_cross_confirmed" for ev in evidence)
                     and any(ev.startswith("causal_zone:") for ev in evidence)
                     and any(ev.startswith("structure_confirmation:") or ev.startswith("liquidity_confirmation:") for ev in evidence)
                 )
@@ -7126,6 +7175,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "entry_time": time.time(), "tp1_hit": False, "tp2_hit": False,
         "trail_activated": False, "be_done": False,
         "entry_gate_snapshot": dict(gate_result),
+        "entry_gate_kind": gate_result.get("gate_kind", "ADAPTIVE_EMA9_VWAP"),
         "entry_gate_timeframe": gate_tf,
         "entry_gate_setup_mode": gate_setup_mode,
         "entry_gate_evidence": list(gate_evidence),
@@ -7133,6 +7183,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "entry_gate_origin_timestamp": gate_origin_timestamp,
         "entry_zone_low": gate_result.get("entry_zone_low"),
         "entry_zone_high": gate_result.get("entry_zone_high"),
+        "entry_zone_available_timestamp": institutional_entry_ctx.get("entry_zone_available_timestamp"),
     }
     if daily_loss_cooldown_active():
         log_execution(f"[ENTRY_BLOCKED] cooldown activated during validation; order not submitted for {symbol}", "WARN")
@@ -8937,7 +8988,11 @@ def scaling_logic(symbol, df, ind):
             "sl": STATE.get("synthetic_sl", STATE.get("sl")),
             "native_sl_original_price": STATE.get("native_sl_original_price", STATE.get("sl")),
             "tp1_price": STATE.get("tp1_price"), "tp2_price": STATE.get("tp2_price"),
-            "entry_gate_snapshot": dict(scale_gate), "entry_gate_timeframe": INTERVAL,
+            "entry_gate_snapshot": dict(scale_gate), "entry_gate_kind": "EMA915_PULLBACK",
+            "entry_gate_timeframe": INTERVAL, "entry_gate_setup_mode": "CONTINUATION",
+            "entry_zone_low": scale_gate.get("entry_zone_low"),
+            "entry_zone_high": scale_gate.get("entry_zone_high"),
+            "entry_zone_available_timestamp": scale_gate.get("entry_zone_available_timestamp"),
         }
         order = open_position(
             STATE["side"], qty, symbol,
@@ -9810,9 +9865,9 @@ function updateUI(d) {{
             let icon = item.cross ? "⚡" : (item.state === "NEAR_CROSS" || item.state === "CONVERGING" ? "🟡" : item.direction === "BUY" ? "📈" : item.direction === "SELL" ? "📉" : "⚪");
             let st = item.ema915_vwap_strategy || {{}};
             let stage = st.stage || "WAITING_FOR_SCAN";
-            let stageColor = stage === "ENTRY_READY" ? "#2ecc71" :
-                (stage === "ENTRY_WINDOW_MISSED" || stage === "CHOP_FILTER" || stage === "STALE_DATA" ? "#e74c3c" :
-                (stage === "NO_FRESH_CROSS" ? "#95a5a6" : "#f1c40f"));
+            let stageColor = ["ENTRY_READY", "MICRO_PULLBACK_READY", "RETEST_READY", "MACRO_PULLBACK_READY"].includes(stage) ? "#2ecc71" :
+                (["ENTRY_WINDOW_MISSED", "INVALIDATED", "CHOP_FILTER", "STALE_DATA"].includes(stage) ? "#e74c3c" :
+                (["NO_FRESH_CROSS", "CROSS_EXPIRED", "CROSS_DIRECTION_MISMATCH"].includes(stage) ? "#95a5a6" : "#f1c40f"));
             let active = st.active_side || "NONE";
             let sideCheck = st[active.toLowerCase()] || {{}};
             let buyCheck = st.buy || {{}};
@@ -9821,8 +9876,8 @@ function updateUI(d) {{
               ${{icon}} <b>${{item.symbol}}</b> | <span style="color:${{stageColor}};font-weight:bold;">${{stage}}</span> | Side: ${{active}}
               <br><small>BUY: ${{buyCheck.stage || "NOT_EVALUATED"}} · Completion ${{buyCheck.setup_progress_pct ?? 0}}% · ${{buyCheck.reason || "-"}} | SELL: ${{sellCheck.stage || "NOT_EVALUATED"}} · Completion ${{sellCheck.setup_progress_pct ?? 0}}% · ${{sellCheck.reason || "-"}}</small>
               <br><small>Legacy EMA9/VWAP proximity (EMA50 advisory): ${{item.state || "UNKNOWN"}} · ${{item.cross_trigger || "No EMA9/VWAP cross"}} | EMA9: ${{item.ema9 ?? "-"}} | EMA50: ${{item.ema50 ?? "-"}} | VWAP: ${{item.vwap ?? "-"}}</small>
-              <br><small>EMA9/EMA15/VWAP: ${{st.trigger || "NOT_EVALUATED"}} | Cross: ${{sideCheck.cross_direction || "-"}} | Cross age: ${{sideCheck.cross_age_bars ?? "-"}} bars | EMA9: ${{sideCheck.ema9 ?? "-"}} | EMA15: ${{sideCheck.ema15 ?? "-"}} | VWAP: ${{sideCheck.vwap ?? "-"}}</small>
-              <br><small>Pullback: ${{sideCheck.pullback_touch ? "CONFIRMED" : "WAITING"}} | Rejection: ${{sideCheck.rejection_confirmed ? "CONFIRMED" : "WAITING"}} | Continuation break: ${{sideCheck.continuation_break ? "CONFIRMED" : "WAITING"}} | No-chase: ${{stage === "ENTRY_WINDOW_MISSED" ? "BLOCKED" : "OK"}}</small>
+              <br><small>EMA9 × EMA15 + Session VWAP: ${{st.trigger || "NOT_EVALUATED"}} | Cross: ${{sideCheck.cross_direction || "-"}} | Cross age: ${{sideCheck.cross_age_bars ?? "-"}} bars | EMA9: ${{sideCheck.ema9 ?? "-"}} | EMA15: ${{sideCheck.ema15 ?? "-"}} | VWAP: ${{sideCheck.vwap ?? "-"}}</small>
+              <br><small>Pullback: ${{sideCheck.pullback_type || (sideCheck.pullback_touch ? "MICRO_PULLBACK" : "WAITING")}} · ${{sideCheck.pullback_touch ? "TOUCHED" : "WAITING"}} | Macro depth: ${{sideCheck.macro_pullback_depth_atr ?? "-"}} ATR | Rejection: ${{sideCheck.rejection_confirmed ? "CONFIRMED" : "WAITING"}} | Continuation break: ${{sideCheck.continuation_break ? "CONFIRMED" : "WAITING"}} | No-chase: ${{stage === "ENTRY_WINDOW_MISSED" ? "BLOCKED" : "OK"}}</small>
               <br><small>Reason: ${{st.reason || "Waiting for closed-candle setup"}} · Closed candles · Watchlist only; final live entry revalidation required</small>
             </div>`;
         }});
@@ -11520,73 +11575,114 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                     last_seen[symbol_key] = candle_ts
                     _observed_at = time.time()
                     _proximity_frame_seconds = float(timeframe_seconds)
-                    _proximity_cross_event = bool(proximity.get("cross_ema9") or proximity.get("cross_ema50"))
-                    _proximity_cross_age = (
-                        max(0.0, _observed_at - (float(proximity.get("candle_timestamp") or 0) / 1000.0
-                                                 + _proximity_frame_seconds))
-                        if _proximity_cross_event else None
-                    )
-                    _proximity_cross_max_age = 2.0 * _proximity_frame_seconds
-                    # The crossover watchlist and execution gateway now share
-                    # one adaptive EMA9/Session-VWAP decision: direct, micro-pullback,
-                    # retest, or explicit wait/no-chase. This remains watchlist-only.
+                    _proximity_cross_event = False
+                    _proximity_cross_age = None
+                    _proximity_cross_max_age = 6.0 * _proximity_frame_seconds
+                    # This scanner now follows the same EMA9/EMA15/VWAP
+                    # cross -> pullback -> separate rejection -> later break
+                    # lifecycle as the final execution gate. It remains discovery-only.
                     _adaptive_checks = {}
                     _watch_price = float(closed["close"].iloc[-1])
                     _watch_ob = analysis.get("order_block") if isinstance(analysis.get("order_block"), dict) else {}
                     _watch_zone_low = analysis.get("entry_zone_low", _watch_ob.get("low"))
                     _watch_zone_high = analysis.get("entry_zone_high", _watch_ob.get("high"))
+                    _watch_zone_timestamp = analysis.get("adaptive_entry_location_timestamp")
+                    _analysis_side = str(analysis.get("side") or "").upper()
                     for _watch_side in ("BUY", "SELL"):
                         try:
-                            _check = _validate_adaptive_ema9_vwap_entry_gate(
+                            _side_zone_low = _watch_zone_low if _analysis_side == _watch_side else None
+                            _side_zone_high = _watch_zone_high if _analysis_side == _watch_side else None
+                            _side_zone_timestamp = _watch_zone_timestamp if _analysis_side == _watch_side else None
+                            _check = _validate_ema915_vwap_pullback_entry_gate(
                                 closed, _watch_side, ema,
                                 timeframe_seconds=int(_proximity_frame_seconds),
-                                now_ms=now_ms, lookback_candles=5, current_price=_watch_price,
-                                entry_zone_low=_watch_zone_low, entry_zone_high=_watch_zone_high,
-                                max_chase_atr=1.5,
+                                now_ms=now_ms, cross_lookback_candles=8,
+                                pullback_lookback_candles=5, current_price=_watch_price,
+                                max_extension_atr=1.5, setup_mode="CONTINUATION",
+                                entry_zone_low=_side_zone_low, entry_zone_high=_side_zone_high,
+                                entry_zone_available_timestamp=_side_zone_timestamp,
                             )
                         except Exception as _check_exc:
                             _check = {"ready": False, "side": _watch_side, "entry_mode": "INVALIDATED",
                                       "reason": f"gate_error:{type(_check_exc).__name__}"}
                         _reason = str(_check.get("reason") or "unknown")
+                        _expected_cross = "BULLISH" if _watch_side == "BUY" else "BEARISH"
+                        _cross_matches_side = str(_check.get("cross_direction") or "").upper() == _expected_cross
+                        _cross_ts = _check.get("cross_timestamp")
+                        _cross_age_bars = (
+                            max(0, int((int(closed.timestamp.iloc[-1]) - int(_cross_ts)) / (int(_proximity_frame_seconds) * 1000)))
+                            if _cross_ts is not None else None
+                        )
+                        _check["cross_age_bars"] = _cross_age_bars
+                        _check["ema9_cross"] = _check.get("cross_direction")
+                        _check["cross_fresh"] = bool(
+                            _cross_matches_side and _cross_age_bars is not None and _cross_age_bars <= 6
+                        )
                         _stage_map = {
-                            "fresh_cross_direct_location_confirmed": "DIRECT_ENTRY",
-                            "micro_pullback_touch_and_reclaim_confirmed": "MICRO_PULLBACK_READY",
-                            "breakout_retest_reclaim_confirmed": "RETEST_READY",
-                            "waiting_for_micro_pullback": "WAITING_FOR_MICRO_PULLBACK",
-                            "waiting_for_structural_retest": "WAITING_FOR_RETEST",
-                            "waiting_for_live_vwap_reclaim": "WAITING_FOR_VWAP_RECLAIM",
+                            "waiting_for_post_cross_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_ema_band_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_ema_band_or_macro_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_directional_rejection": "WAITING_FOR_REJECTION",
+                            "waiting_for_continuation_break": "WAITING_FOR_CONTINUATION_BREAK",
+                            "continuation_break_volume_unavailable": "WAITING_FOR_CONTINUATION_BREAK",
+                            "continuation_break_volume_not_confirmed": "WAITING_FOR_CONTINUATION_BREAK",
+                            "continuation_break_candle_quality_not_confirmed": "WAITING_FOR_CONTINUATION_BREAK",
+                            "continuation_break_displacement_not_confirmed": "WAITING_FOR_CONTINUATION_BREAK",
+                            "ema915_or_vwap_direction_not_aligned": "WAITING_FOR_RECLAIM",
+                            "false_breakout_close_back_inside": "INVALIDATED",
                             "entry_window_missed_no_chase": "ENTRY_WINDOW_MISSED",
                             "cross_window_expired": "CROSS_EXPIRED",
-                            "missing_fresh_directional_ema9_vwap_cross": "NO_FRESH_CROSS",
-                            "latest_closed_ema9_vwap_relationship_not_directional": "WAITING_FOR_ALIGNMENT",
+                            "pullback_window_expired": "CROSS_EXPIRED",
+                            "missing_fresh_ema9_ema15_cross": "NO_FRESH_CROSS",
+                            "ema9_ema15_cross_direction_mismatch": "CROSS_DIRECTION_MISMATCH",
+                            "ema915_or_vwap_direction_not_aligned": "WAITING_FOR_RECLAIM",
+                            "ema915_vwap_or_macro_trend_not_aligned": "WAITING_FOR_ALIGNMENT",
                             "stale_closed_candle_data": "STALE_DATA",
+                            "excessive_ema915_whipsaw": "CHOP_FILTER",
+                            "excessive_vwap_whipsaw": "CHOP_FILTER",
                         }
-                        _check["stage"] = (_stage_map.get(_reason, "ENTRY_READY" if _check.get("ready") else "WAITING"))
+                        if _check.get("ready") is True:
+                            _check["stage"] = (
+                                "MACRO_PULLBACK_READY" if _check.get("entry_mode") == "MACRO_PULLBACK"
+                                else "RETEST_READY" if _check.get("entry_mode") == "RETEST"
+                                else "MICRO_PULLBACK_READY"
+                            )
+                        else:
+                            _check["stage"] = _stage_map.get(_reason, "WAITING" if _check.get("cross_fresh") else "NO_FRESH_CROSS")
                         _check["setup_progress_pct"] = {
-                            "DIRECT_ENTRY": 100, "MICRO_PULLBACK_READY": 100, "RETEST_READY": 100,
-                            "WAITING_FOR_RETEST": 65, "WAITING_FOR_MICRO_PULLBACK": 45,
-                            "WAITING_FOR_VWAP_RECLAIM": 25, "ENTRY_WINDOW_MISSED": 0,
-                            "CROSS_EXPIRED": 0, "NO_FRESH_CROSS": 0, "STALE_DATA": 0,
+                            "MICRO_PULLBACK_READY": 100, "MACRO_PULLBACK_READY": 100,
+                            "WAITING_FOR_CONTINUATION_BREAK": 80, "WAITING_FOR_REJECTION": 60,
+                            "WAITING_FOR_PULLBACK": 35, "WAITING_FOR_RECLAIM": 25,
+                            "RETEST_READY": 100,
+                            "ENTRY_WINDOW_MISSED": 0, "INVALIDATED": 0,
+                            "CROSS_EXPIRED": 0, "CROSS_DIRECTION_MISMATCH": 0,
+                            "NO_FRESH_CROSS": 0, "STALE_DATA": 0, "CHOP_FILTER": 0,
                         }.get(_check["stage"], 15)
                         _check["setup_progress_basis"] = "RULE_STAGE_COMPLETION_NOT_WIN_PROBABILITY"
                         _adaptive_checks[_watch_side] = _check
                     _ready_sides = [s for s, v in _adaptive_checks.items() if v.get("ready")]
                     _active_side = _ready_sides[0] if _ready_sides else None
                     if _active_side is None:
-                        for _side_name, _side_check in _adaptive_checks.items():
-                            _cross = str(_side_check.get("ema9_cross") or "").upper()
-                            if _cross == ("BULLISH" if _side_name == "BUY" else "BEARISH"):
-                                _active_side = _side_name
-                                break
-                    if _active_side is None:
-                        _active_side = "BUY" if proximity.get("cross_any") == "BULLISH" else "SELL" if proximity.get("cross_any") == "BEARISH" else None
+                        _fresh_sides = [
+                            s for s, v in _adaptive_checks.items()
+                            if v.get("cross_fresh") is True
+                        ]
+                        _active_side = _fresh_sides[0] if _fresh_sides else None
+                    _active_check_candidate = _adaptive_checks.get(_active_side, {}) if _active_side else {}
+                    _cross_ts_for_age = _active_check_candidate.get("cross_timestamp")
+                    if _cross_ts_for_age is not None:
+                        _proximity_cross_event = True
+                        _proximity_cross_age = max(
+                            0.0, _observed_at - (float(_cross_ts_for_age) / 1000.0 + _proximity_frame_seconds)
+                        )
                     _active_check = _adaptive_checks.get(_active_side, {}) if _active_side else {}
                     _strategy_snapshot = {
-                        "trigger": "EMA9_SESSION_VWAP_ADAPTIVE",
+                        "trigger": "EMA9_EMA15_SESSION_VWAP_PULLBACK",
                         "active_side": _active_side or "NONE",
                         "stage": _active_check.get("stage", "NO_FRESH_CROSS"),
                         "reason": _active_check.get("reason", "no_directional_setup"),
                         "entry_ready": bool(_active_check.get("ready")),
+                        "cross_fresh": bool(_active_check.get("cross_fresh")),
                         "buy": _adaptive_checks["BUY"],
                         "sell": _adaptive_checks["SELL"],
                         "observed_price": _watch_price,
@@ -11603,7 +11699,9 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                         "timeframe_seconds": _proximity_frame_seconds,
                         "cross_age_seconds": _proximity_cross_age,
                         "cross_max_age_seconds": _proximity_cross_max_age,
-                        "cross_fresh": bool(_proximity_cross_event and _proximity_cross_age <= _proximity_cross_max_age),
+                        "cross_fresh": bool(_active_check.get("cross_fresh") and _proximity_cross_event
+                                            and _proximity_cross_age is not None
+                                            and _proximity_cross_age <= _proximity_cross_max_age),
                         "data_quality": "CLOSED_CANDLES",
                         "role": "RANKING_ONLY_NOT_ENTRY_GATE",
                     }
@@ -11969,6 +12067,7 @@ def smart_opportunity_selection():
                 "entry_behavior": str(item.get("entry_behavior") or market_intelligence.get("entry_behavior") or "WAIT_FOR_STRUCTURE"),
                 "entry_zone_low": safe_float(item.get("entry_zone_low", market_intelligence.get("reference_low")), 0.0),
                 "entry_zone_high": safe_float(item.get("entry_zone_high", market_intelligence.get("reference_high")), 0.0),
+                "entry_zone_available_timestamp": item.get("adaptive_entry_location_timestamp"),
                 "support_resistance": dict(item.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
                 "order_block": dict(item.get("order_block") or {}),
                 "fvg": dict(item.get("fvg") or {}),

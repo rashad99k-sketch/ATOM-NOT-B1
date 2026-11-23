@@ -147,3 +147,71 @@ def test_decision_serializer_flattens_tuple_evidence():
     assert result["evidence"] == ["sweep", "reclaim", "closed_mss"]
     assert result["rejection_reasons"] == ["trigger_pending"]
     assert all(isinstance(value, str) for value in result["evidence"] + result["rejection_reasons"])
+
+
+def test_fresh_ema915_pullback_scanner_hints_are_merged_without_entry_authority():
+    import time
+    row = {
+        "symbol": "AVAX/USDT:USDT",
+        "updated_at": time.time(),
+        "timeframe_seconds": 900,
+        "cross_fresh": True,
+        "data_quality": "CLOSED_CANDLES",
+        "role": "RANKING_ONLY_NOT_ENTRY_GATE",
+        "ema9_vwap_adaptive_strategy": {
+            "trigger": "EMA9_EMA15_SESSION_VWAP_PULLBACK",
+            "active_side": "BUY",
+            "stage": "WAITING_FOR_PULLBACK",
+            "cross_fresh": True,
+            "entry_ready": False,
+        },
+    }
+    alignment_row = {
+        **row,
+        "symbol": "MATIC/USDT:USDT",
+        "ema9_vwap_adaptive_strategy": {
+            **row["ema9_vwap_adaptive_strategy"],
+            "stage": "WAITING_FOR_ALIGNMENT",
+        },
+    }
+    merged = merge_candidates({"ema9_vwap_proximity_scanner": [row, alignment_row]})
+    assert set(merged) == {"AVAX", "MATIC"}
+    assert merged["AVAX"]["sides"] == ["BUY"]
+    assert "ema9_vwap_proximity_scanner" in merged["AVAX"]["sources"]
+    assert merged["AVAX"]["ema9_vwap_adaptive_strategy"]["entry_ready"] is False
+    assert merged["MATIC"]["ema9_vwap_adaptive_strategy"]["stage"] == "WAITING_FOR_ALIGNMENT"
+
+
+def test_stale_or_non_directional_ema915_scanner_rows_are_not_candidates():
+    import time
+    stale = {
+        "symbol": "LINK/USDT:USDT", "updated_at": time.time() - 7200,
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "WAITING_FOR_PULLBACK"},
+    }
+    no_cross = {
+        "symbol": "SOL/USDT:USDT", "updated_at": time.time(),
+        "timeframe_seconds": 900, "cross_fresh": False, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "SELL", "stage": "WAITING_FOR_PULLBACK"},
+    }
+    invalid_stage = {
+        "symbol": "ETH/USDT:USDT", "updated_at": time.time(),
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "ENTRY_WINDOW_MISSED"},
+    }
+    malformed_timestamp = {
+        "symbol": "DOGE/USDT:USDT", "updated_at": "not-a-timestamp",
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "WAITING_FOR_PULLBACK"},
+    }
+    future_dated = {
+        "symbol": "XRP/USDT:USDT", "updated_at": time.time() + 3600,
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "WAITING_FOR_PULLBACK"},
+    }
+    merged = merge_candidates({
+        "ema9_vwap_proximity_scanner": [
+            stale, no_cross, invalid_stage, malformed_timestamp, future_dated
+        ]
+    })
+    assert merged == {}

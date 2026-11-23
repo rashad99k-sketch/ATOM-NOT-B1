@@ -114,4 +114,5 @@ def test_scanner_persists_cross_event_age_and_observation_timestamp():
     source = Path("ggpbot.py").read_text(encoding="utf-8")
     assert '"observation_age_seconds": 0.0' in source
     assert '"cross_age_seconds": _proximity_cross_age' in source
-    assert '"cross_fresh": bool(_proximity_cross_event and _proximity_cross_age <= _proximity_cross_max_age)' in source
+    assert '"cross_fresh": bool(_active_check.get("cross_fresh") and _proximity_cross_event' in source
+    assert '_check["cross_fresh"] = bool(' in source

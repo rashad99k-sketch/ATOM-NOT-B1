@@ -214,13 +214,196 @@ def test_all_execution_paths_use_primary_gate_and_live_last_mile_revalidates():
     execute_end = source.find("\ndef ", execute_start + 1)
     execute = source[execute_start:execute_end]
     assert "_validate_adaptive_ema9_vwap_entry_gate(" in execute
+    assert "_validate_ema915_vwap_pullback_entry_gate(" in execute
+    assert 'gate_setup_type == "EMA9_VWAP_ADAPTIVE"' in execute
     assert "_validate_dual_ema_vwap_entry_gate(" not in execute
     open_position = source[source.index("def open_position("):]
     assert "[EMA9_VWAP_FINAL_GATE]" in open_position
     assert "_validate_adaptive_ema9_vwap_entry_gate(" in open_position
+    assert "_validate_ema915_vwap_pullback_entry_gate(" in open_position
+    assert 'gate_kind == "EMA915_PULLBACK"' in open_position
     assert "entry_gate_snapshot" in open_position
     assert "submit_market_entry(" in open_position
     scaling = source[source.index("def scaling_logic("):source.index("def council_exit(")]
     assert "_validate_ema915_vwap_pullback_entry_gate(" in scaling
     assert "EMA915_SCALE_IN_BLOCK" in scaling
     assert scaling.index('STATE["qty"] += actual_scale_qty') < scaling.index("journal.consume_event(event_id, scale_trade_id)")
+
+
+def _macro_frame():
+    frame = _frame("BUY", count=80)
+    # Confirmed pre-cross swing low. The macro retest must not damage it.
+    frame.loc[70, ["open", "high", "low", "close"]] = [99.5, 100.0, 98.0, 99.4]
+    # Cross candle, followed by a deep touch at EMA50 + validated OB zone,
+    # then a distinct rejection candle, then a later quality breakout close.
+    frame.loc[76, ["open", "high", "low", "close"]] = [100.0, 101.2, 99.9, 100.6]
+    frame.loc[77, ["open", "high", "low", "close"]] = [99.9, 100.4, 98.9, 99.8]
+    frame.loc[78, ["open", "high", "low", "close"]] = [99.75, 100.35, 99.65, 100.25]
+    frame.loc[79, ["open", "high", "low", "close"]] = [100.1, 100.8, 100.0, 100.7]
+    frame.loc[79, "volume"] = 1400.0
+    return frame
+
+
+def _macro_ema(values, period):
+    n = len(values)
+    if period == 9:
+        out = np.full(n, 99.8, dtype=float)
+        out[-4:] = [100.2, 100.2, 100.2, 100.2]
+    elif period == 15:
+        out = np.full(n, 100.0, dtype=float)
+    elif period == 20:
+        out = np.full(n, 100.4, dtype=float)
+        out[-4:] = [100.55, 100.65, 100.75, 100.85]
+    elif period == 50:
+        out = np.full(n, 99.0, dtype=float)
+        out[-4:] = [99.0, 99.05, 99.10, 99.15]
+    else:
+        raise AssertionError(f"unexpected EMA period: {period}")
+    return pd.Series(out, index=values.index)
+
+
+def test_macro_pullback_requires_ema50_causal_zone_protected_swing_rejection_and_break(monkeypatch):
+    frame = _macro_frame()
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[73]),
+    )
+    assert result["ready"] is True
+    assert result["entry_mode"] == "MACRO_PULLBACK"
+    assert result["macro_pullback"] is True
+    assert result["protected_swing_level"] == 98.0
+    assert result["pullback_touch"] is True
+    assert result["rejection_confirmed"] is True
+    assert result["continuation_break"] is True
+    assert result["authorization_state"] == "EMA915_VWAP_MACRO_PULLBACK_VALID"
+
+
+def test_macro_pullback_cannot_use_zone_before_zone_creation_timestamp(monkeypatch):
+    frame = _macro_frame()
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[78]),
+    )
+    assert result["ready"] is False
+    assert result["entry_mode"] == "WAITING_FOR_PULLBACK"
+    assert result["macro_pullback"] is False
+
+
+def test_macro_pullback_requires_a_confirmed_pre_cross_swing(monkeypatch):
+    frame = _macro_frame()
+    frame.loc[70, ["open", "high", "low", "close"]] = [99.9, 100.0, 99.8, 99.9]
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[73]),
+    )
+    assert result["ready"] is False
+    assert result.get("macro_pullback") is False
+    assert result["entry_mode"] == "WAITING_FOR_PULLBACK"
+
+
+def test_institutional_zone_retest_is_separate_from_ema50_macro_pullback(monkeypatch):
+    frame = _macro_frame()
+    def retest_ema(values, period):
+        if period == 9:
+            out = np.full(len(values), 99.8, dtype=float)
+            out[-4:] = 100.2
+        elif period == 15:
+            out = np.full(len(values), 100.0, dtype=float)
+        elif period == 20:
+            out = np.full(len(values), 100.4, dtype=float)
+            out[-4:] = [100.55, 100.65, 100.75, 100.85]
+        elif period == 50:
+            out = np.full(len(values), 95.0, dtype=float)
+            out[-4:] = [95.0, 95.05, 95.10, 95.15]
+        else:
+            raise AssertionError(f"unexpected EMA period: {period}")
+        return pd.Series(out, index=values.index)
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", retest_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[73]),
+    )
+    assert result["ready"] is True
+    assert result["entry_mode"] == "RETEST"
+    assert result["macro_pullback"] is False
+    assert result["authorization_state"] == "EMA915_VWAP_RETEST_VALID"
+
+
+def test_macro_alignment_exception_never_weakens_reversal_vwap_gate(monkeypatch):
+    frame = _frame("BUY")
+    def ema_with_macro_trend(values, period):
+        if period == 9:
+            out = np.full(len(values), 99.8, dtype=float)
+            out[-4:] = 100.2
+        elif period == 15:
+            out = np.full(len(values), 100.0, dtype=float)
+        elif period == 20:
+            out = np.full(len(values), 100.3, dtype=float)
+            out[-4:] = [100.3, 100.4, 100.5, 100.6]
+        elif period == 50:
+            out = np.full(len(values), 99.8, dtype=float)
+            out[-4:] = [99.8, 99.9, 99.95, 100.0]
+        else:
+            raise AssertionError(f"unexpected EMA period: {period}")
+        return pd.Series(out, index=values.index)
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(100.4, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", ema_with_macro_trend, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.5,
+        setup_mode="REVERSAL",
+    )
+    assert result["macro_trend_aligned"] is True
+    assert result["ready"] is False
+    assert result["reason"] == "ema915_or_vwap_direction_not_aligned"
+
+
+def test_macro_retest_is_invalidated_if_protected_swing_breaks_before_rejection(monkeypatch):
+    frame = _macro_frame()
+    # The retest touches the causal zone on candle 77, but candle 78 closes
+    # decisively through the pre-cross swing low before any rejection can form.
+    frame.loc[78, ["open", "high", "low", "close"]] = [99.8, 100.0, 97.5, 97.8]
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[73]),
+    )
+    assert result["ready"] is False
+    assert result["entry_mode"] == "INVALIDATED"
+    assert result["reason"] == "retest_swing_invalidated"
+    assert result["retest_invalidated"] is True
