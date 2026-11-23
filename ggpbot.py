@@ -11635,9 +11635,8 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
         now_ms = int(time.time() * 1000)
         timeframe_seconds = _roro_timeframe_seconds(INTERVAL)
         closed = roro_validate_closed_frame(frame, now_ms=now_ms, timeframe_s=timeframe_seconds)
-        if len(closed) < 55:
-            return {"gpp_engine_diagnostics": {"status": "PARTIAL", "reason": "insufficient_closed_candles"}}
-        # M15 lifecycle runs inside Scanner-2 using the already-fetched closed frame.
+        # M15 radar needs 30 closed bars and should still run when the deeper
+        # institutional enrichment's 55-bar minimum is not met.
         if str(INTERVAL).strip().lower() == "15m":
             try:
                 _m15_symbol = str(analysis.get("symbol") or analysis.get("exchange_symbol") or "").strip()
@@ -11660,6 +11659,11 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                     "stage": "UNKNOWN", "entry_authorization": False,
                     "diagnostic": type(_m15_exc).__name__,
                 }
+        if len(closed) < 55:
+            return {
+                **result,
+                "gpp_engine_diagnostics": {"status": "PARTIAL", "reason": "insufficient_closed_candles"},
+            }
         smart = SmartMoneyEngine.analyze_smart_money(closed)
         momentum = MomentumFlowEngine.analyze_momentum_flow(closed)  # GGP engine uses direction-neutral signature
         adx_state = ADXDIIntelligence.get_adx_state(closed)
