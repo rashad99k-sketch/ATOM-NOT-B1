@@ -66,4 +66,4 @@ def test_entry_authorization_keeps_explicit_recovery_fail_closed_guard():
     node = _function(source, "smart_opportunity_selection")
     names = {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
     assert "RECOVERY_BLOCK_ENTRIES" in names
-    assert "position_status" in names
+    assert any(isinstance(item, ast.Constant) and item.value == "position_status" for item in ast.walk(node))
