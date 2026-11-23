@@ -126,8 +126,12 @@ def test_support_resistance_zero_distance_is_not_replaced_with_missing_sentinel(
 def test_dashboard_health_and_data_routes_respond_without_exchange_calls(monkeypatch):
     import ggpbot
 
-    monkeypatch.setattr(ggpbot, "get_balance_safe", lambda: 25.0)
-    monkeypatch.setattr(ggpbot, "get_free_balance_safe", lambda: 20.0)
+    monkeypatch.setattr(ggpbot, "get_dashboard_account_snapshot", lambda: {
+        "balance": 25.0, "free_balance": 20.0, "status": "VALID",
+        "source": "TEST", "updated_at": 1.0, "age_seconds": 0.0, "fresh": True,
+    })
+    monkeypatch.setattr(ggpbot, "get_balance_safe", lambda: (_ for _ in ()).throw(AssertionError("dashboard must not call exchange balance")))
+    monkeypatch.setattr(ggpbot, "get_free_balance_safe", lambda: (_ for _ in ()).throw(AssertionError("dashboard must not call exchange free balance")))
     monkeypatch.setattr(ggpbot, "get_dashboard_metrics", lambda: {
         "total_pnl": "0.00%", "total_pnl_usdt": 0.0, "last_trade": "N/A"
     })

@@ -61,6 +61,7 @@ except Exception as _env_exc:
     print(f"[ENV] configuration loader unavailable: {type(_env_exc).__name__}; process environment only")
 
 from ggp_runtime_config import resolve_trading_mode
+from ggp_dashboard_snapshot import DashboardAccountSnapshot
 from ggp_api_coalescer import KeyedSingleFlight
 from ggp_management_events import TradeManagementEventLog
 from ggp_telegram import TelegramNotifier
@@ -1175,6 +1176,78 @@ def get_free_balance_safe():
     bal = get_free_balance()
     cache_set("free_balance", bal)
     return bal
+
+
+# Dashboard requests read this snapshot only; exchange I/O runs on its own worker.
+DASHBOARD_ACCOUNT_SNAPSHOT = DashboardAccountSnapshot()
+_DASHBOARD_ACCOUNT_THREAD = None
+_DASHBOARD_ACCOUNT_THREAD_LOCK = threading.Lock()
+_DASHBOARD_ACCOUNT_STOP = threading.Event()
+
+
+def _optional_usdt_value(bucket):
+    if not isinstance(bucket, dict):
+        return None
+    value = bucket.get("USDT")
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def refresh_dashboard_account_snapshot():
+    if PAPER_MODE:
+        balance = _optional_usdt_value({"USDT": paper.get("balance")})
+        return DASHBOARD_ACCOUNT_SNAPSHOT.update(
+            balance, balance, source="PAPER"
+        )
+    raw = safe_api_call(ex.fetch_balance)
+    if not isinstance(raw, dict):
+        raise RuntimeError("BingX fetch_balance returned no usable account snapshot")
+    balance = _optional_usdt_value(raw.get("total"))
+    free_balance = _optional_usdt_value(raw.get("free"))
+    if balance is None and free_balance is None:
+        raise RuntimeError("BingX balance response is missing total/free USDT values")
+    return DASHBOARD_ACCOUNT_SNAPSHOT.update(
+        balance, free_balance, source="BINGX_FUTURES"
+    )
+
+
+def _dashboard_account_snapshot_worker():
+    while not _DASHBOARD_ACCOUNT_STOP.is_set():
+        try:
+            refresh_dashboard_account_snapshot()
+        except Exception as exc:
+            DASHBOARD_ACCOUNT_SNAPSHOT.mark_error(
+                f"{type(exc).__name__}: {str(exc)[:180]}"
+            )
+            log_execution(
+                f"[ACCOUNT_SNAPSHOT] refresh failed: {type(exc).__name__}: {exc}",
+                "WARN", debounce_key="dashboard_account_snapshot_error", debounce_sec=60
+            )
+        _DASHBOARD_ACCOUNT_STOP.wait(15.0)
+
+
+def start_dashboard_account_snapshot_worker():
+    global _DASHBOARD_ACCOUNT_THREAD
+    with _DASHBOARD_ACCOUNT_THREAD_LOCK:
+        if _DASHBOARD_ACCOUNT_THREAD is not None and _DASHBOARD_ACCOUNT_THREAD.is_alive():
+            return False
+        _DASHBOARD_ACCOUNT_STOP.clear()
+        _DASHBOARD_ACCOUNT_THREAD = threading.Thread(
+            target=_dashboard_account_snapshot_worker,
+            daemon=True,
+            name="dashboard_account_snapshot",
+        )
+        _DASHBOARD_ACCOUNT_THREAD.start()
+        return True
+
+
+def get_dashboard_account_snapshot():
+    if PAPER_MODE and DASHBOARD_ACCOUNT_SNAPSHOT.snapshot().get("status") == "NOT_STARTED":
+        refresh_dashboard_account_snapshot()
+    return DASHBOARD_ACCOUNT_SNAPSHOT.snapshot()
 
 
 def get_available_balance_snapshot(max_age_sec=15.0):
@@ -10177,8 +10250,10 @@ def decision_feed():
 @app.route("/data")
 def data():
     try:
-        bal = get_balance_safe()
-        free_bal = get_free_balance_safe()
+        # HTTP dashboard polling must never synchronously call BingX.
+        account_snapshot = get_dashboard_account_snapshot()
+        bal = account_snapshot.get("balance")
+        free_bal = account_snapshot.get("free_balance")
         avail_margin = free_bal
         mode = "LIVE" if MODE_LIVE else "PAPER"
         DASHBOARD_STATE["account"]["balance"] = bal
@@ -10272,6 +10347,7 @@ def data():
         payload = {
             "balance": bal,
             "free_balance": free_bal,
+            "account_snapshot": account_snapshot,
             "avail_margin": avail_margin,
             "mode": mode,
             "stats": DASHBOARD_STATE["stats"],
@@ -10280,7 +10356,7 @@ def data():
             "errors": DASHBOARD_STATE["errors"][-10:],
             "top5": top5,
             "candidates": MEMORY.get("top_candidates", []),
-            "scanned_count": len(MEMORY.get("top_candidates", [])),
+            "scanned_count": int(MEMORY.get("scanned_count", len(MEMORY.get("top_candidates", []))) or 0),
             "last_scan": MEMORY["last_scan"],
             "regime": MEMORY["regime"],
             "health": health,
@@ -10425,6 +10501,89 @@ def health():
         "trade_management_events": len(TRADE_MANAGEMENT_LOG),
         "telegram": TELEGRAM_NOTIFIER.status(),
     })
+
+@app.route("/runtime-diagnostics")
+def runtime_diagnostics():
+    """Read-only runtime snapshot. This endpoint performs no exchange/network calls."""
+    now = time.time()
+    runtime_state = MEMORY.get("runtime_supervisor") if isinstance(MEMORY.get("runtime_supervisor"), dict) else {}
+    discovery = MEMORY.get("discovery_scanner") if isinstance(MEMORY.get("discovery_scanner"), dict) else {}
+    watchlist_meta = MEMORY.get("ema9_vwap_proximity_scanner_meta") if isinstance(MEMORY.get("ema9_vwap_proximity_scanner_meta"), dict) else {}
+    flow = DASHBOARD_STATE.get("institutional_flow") if isinstance(DASHBOARD_STATE.get("institutional_flow"), dict) else {}
+    try:
+        tasks = {
+            str(name): {
+                **(dict(value) if isinstance(value, dict) else {"state": str(value)}),
+                "age_seconds": round(max(0.0, now - float(value.get("started_at", now))), 2)
+                    if isinstance(value, dict) and value.get("started_at") else None,
+            }
+            for name, value in list((MEMORY.get("scanner_tasks") or {}).items())
+        }
+    except Exception:
+        tasks = {"snapshot_status": "UNAVAILABLE"}
+    heartbeat_ts = safe_float(runtime_state.get("heartbeat_ts"), 0.0)
+    flow_updated = safe_float(flow.get("last_valid_update_ms"), 0.0) / 1000.0
+    account = DASHBOARD_ACCOUNT_SNAPSHOT.snapshot(now=now)
+    return jsonify({
+        "timestamp": now,
+        "runtime": {
+            "status": runtime_state.get("status", "NOT_STARTED"),
+            "heartbeat_age_seconds": round(max(0.0, now - heartbeat_ts), 2) if heartbeat_ts else None,
+            "loop_cycles": int(runtime_state.get("loop_cycles", 0) or 0),
+            "thread_alive": bool(runtime_state.get("thread_alive", False)),
+            "last_error": runtime_state.get("last_error"),
+        },
+        "discovery": {
+            **dict(discovery),
+            "stage_age_seconds": round(max(0.0, now - safe_float(discovery.get("last_progress_at"), now)), 2),
+            "task": tasks.get("global_discovery", {}),
+        },
+        "scanner_tasks": tasks,
+        "scanner_v2": {
+            "state": MEMORY.get("scanner_v2_state", "UNKNOWN"),
+            "last_scan_age_seconds": round(max(0.0, now - safe_float(MEMORY.get("scanner_v2_last_scan"), now)), 2)
+                if MEMORY.get("scanner_v2_last_scan") else None,
+            "buy_count": len(MEMORY.get("scanner_v2_buy", []) or []),
+            "sell_count": len(MEMORY.get("scanner_v2_sell", []) or []),
+        },
+        "rf": {
+            "last_scan_age_seconds": round(max(0.0, now - safe_float(MEMORY.get("last_scan"), now)), 2)
+                if MEMORY.get("last_scan") else None,
+            "candidate_count": len(MEMORY.get("rf_watchlist", []) or []),
+        },
+        "watchlist": {
+            "count": len(MEMORY.get("watchlist", {}) or {}),
+            "last_update": MEMORY.get("unified_watchlist_last_update"),
+            "refresh_ok": MEMORY.get("_unified_watchlist_refresh_ok"),
+            "last_batch_count": MEMORY.get("unified_watchlist_last_batch_count"),
+            "stop_reason": MEMORY.get("unified_watchlist_stop_reason"),
+            "proximity_count": len(MEMORY.get("ema9_vwap_proximity_scanner", []) or []),
+            "proximity_meta": dict(watchlist_meta),
+        },
+        "m15_radar": {
+            "count": len(MEMORY.get("m15_crossover_radar", []) or []),
+            "setup_count": len(MEMORY.get("m15_setup_watchlist", []) or []),
+            "meta": dict(MEMORY.get("m15_crossover_radar_meta") or {}),
+        },
+        "institutional_flow": {
+            "status": flow.get("status", "DATA_UNAVAILABLE"),
+            "reason": flow.get("reason"),
+            "source_symbol": flow.get("source_symbol"),
+            "source_timeframe": flow.get("source_timeframe"),
+            "last_valid_age_seconds": round(max(0.0, now - flow_updated), 2) if flow_updated else None,
+        },
+        "entry_safety": {
+            "discovery_paused": bool(_discovery_paused()),
+            "recovery_block_entries": bool(globals().get("RECOVERY_BLOCK_ENTRIES", False)),
+            "position_status": MEMORY.get("position_status"),
+            "recovery_status": MEMORY.get("recovery_status"),
+            "local_position_open": bool(STATE.get("open")),
+            "trade_state_in_position": bool(TRADE_STATE.get("in_position")),
+        },
+        "account_snapshot": account,
+        "api_backoff": dict(globals().get("_LAST_API_RATE_LIMIT", {}) or {}),
+    }), 200
+
 
 @app.route("/runtime-health")
 def runtime_health():
@@ -11444,7 +11603,8 @@ def main_loop_sniper():
         log_execution(f"Markets loaded", "INFO")
     except Exception as e:
         log_execution(f"Failed to load markets: {e}", "ERROR")
-    tg_start(get_balance_safe(), "LIVE" if MODE_LIVE else "PAPER")
+    start_dashboard_account_snapshot_worker()
+    tg_start(get_dashboard_account_snapshot().get("balance"), "LIVE" if MODE_LIVE else "PAPER")
     if dispatch_scanner_task("global_discovery", run_global_discovery_scanner):
         last_scan = time.time()
         log_execution("[SCANNER_1] Initial bounded global discovery dispatched", "INFO")
@@ -12368,7 +12528,8 @@ def run_global_discovery_scanner():
     """
     started = time.time()
     meta = MEMORY.setdefault("discovery_scanner", {})
-    meta.update({"state": "RUNNING", "last_started": started, "symbols_scanned": 0,
+    meta.update({"state": "RUNNING", "stage": "LOAD_UNIVERSE", "last_started": started,
+                 "last_progress_at": started, "symbols_scanned": 0,
                  "universe_limit": SCANNER_UNIVERSE_MAX})
     if _discovery_paused():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
@@ -12381,6 +12542,7 @@ def run_global_discovery_scanner():
         symbols = list(dict.fromkeys(list(symbols) + retained[:80]))
     except Exception as retain_exc:
         log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
+    meta.update({"stage": "SCANNER_V2", "last_progress_at": time.time(), "symbols_total": len(symbols)})
     with _SCANNER_FRAME_CACHE_LOCK:
         _SCANNER_FRAME_CACHE.clear()
     if not symbols:
@@ -12392,6 +12554,8 @@ def run_global_discovery_scanner():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
         return
     run_scanner_v2(symbols=symbols)
+    meta.update({"stage": "PROFESSIONAL_SCAN", "last_progress_at": time.time(),
+                 "scanner_v2_completed_at": time.time()})
     if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
@@ -12429,6 +12593,7 @@ def run_global_discovery_scanner():
     if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
+    meta.update({"stage": "RF_SCAN", "last_progress_at": time.time()})
     rf_candidates = scan_market_rf(top_n=40, symbols=symbols)
     MEMORY["rf_watchlist"] = rf_candidates[:30]
     MEMORY["last_scan"] = time.time()
@@ -12441,6 +12606,8 @@ def run_global_discovery_scanner():
         "role": "DISCOVERY_HINT_ONLY",
     } for item in rf_candidates[:30]]
 
+    meta.update({"stage": "RADAR", "last_progress_at": time.time(),
+                 "rf_completed_at": time.time(), "rf_candidates": len(rf_candidates)})
     # Radar is intentionally applied only to the highest-ranked distinct names.
     radar_candidates = []
     top_symbols = []
@@ -12496,7 +12663,8 @@ def run_global_discovery_scanner():
     MEMORY["top_candidates"] = blended[:60]
 
     meta.update({
-        "state": "IDLE", "last_completed": time.time(), "symbols_scanned": len(symbols),
+        "state": "IDLE", "stage": "COMPLETE", "last_completed": time.time(),
+        "last_progress_at": time.time(), "symbols_scanned": len(symbols),
         "professional_candidates": len(pro_candidates), "professional_valid_data": pro_stats.get("valid_data", 0),
         "rf_candidates": len(rf_candidates),
         "buy_candidates": len(MEMORY.get("scanner_v2_buy", [])),
@@ -13795,19 +13963,31 @@ def sync_position_state(symbol=None):
     return snap.mark_price, snap.unrealized_pnl, snap.margin, snap.roe_pct
 
 
+_LAST_IDLE_POSITION_SYNC_MONOTONIC = 0.0
+_LAST_REALIZED_PNL_SYNC_MONOTONIC = 0.0
+IDLE_POSITION_SYNC_INTERVAL_SECONDS = 5.0
+REALIZED_PNL_SYNC_INTERVAL_SECONDS = 30.0
+
+
 def sync_all_states():
+    """Keep exposure reconciliation responsive without polling account history every loop."""
     global RECOVERY_BLOCK_ENTRIES
+    global _LAST_IDLE_POSITION_SYNC_MONOTONIC, _LAST_REALIZED_PNL_SYNC_MONOTONIC
     if PAPER_MODE:
         MEMORY["position_status"] = "OPEN" if STATE.get("open") else "FLAT"
         MEMORY["total_pnl"] = PERF.get("total_pnl_usdt", 0.0)
         MEMORY["total_pnl_pct"] = PERF.get("total_pnl_pct", 0.0) * 100
         RECOVERY_BLOCK_ENTRIES = False
         return
+
+    now_mono = time.monotonic()
     symbol = STATE.get("current_symbol") if STATE.get("open") else None
     if symbol:
+        # Open-position reconciliation remains on every supervisor cycle.
         sync_position_state(symbol)
-    else:
+    elif now_mono - _LAST_IDLE_POSITION_SYNC_MONOTONIC >= IDLE_POSITION_SYNC_INTERVAL_SECONDS:
         status, positions = fetch_position_tri_state(None)
+        _LAST_IDLE_POSITION_SYNC_MONOTONIC = now_mono
         if status == "UNKNOWN":
             MEMORY["position_status"] = "UNKNOWN"
             MEMORY["current_position"] = None
@@ -13815,25 +13995,29 @@ def sync_all_states():
         elif status == "FLAT":
             MEMORY["position_status"] = "FLAT"
             MEMORY["current_position"] = None
-            # Confirmed flat resolves an ambiguous order write without fabricating a fill.
             STATE["execution_unresolved"] = False
             STATE["recovery_hold"] = False
             RECOVERY_BLOCK_ENTRIES = False
         elif status == "OPEN" and positions:
             if len(positions) == 1:
                 position = positions[0]
-                key = roro_canonical_symbol(_position_symbol(position))
                 _attempt_runtime_trade_recovery(_position_symbol(position), position=position, force=False)
             else:
                 MEMORY["position_status"] = "MULTIPLE_OPEN"
                 RECOVERY_BLOCK_ENTRIES = True
-    symbol_for_pnl = symbol or DEFAULT_SYMBOL
-    try:
-        real_pnl, real_pnl_pct = get_realized_pnl(symbol_for_pnl)
-        MEMORY["total_pnl"] = real_pnl
-        MEMORY["total_pnl_pct"] = real_pnl_pct
-    except Exception:
-        pass
+
+    if now_mono - _LAST_REALIZED_PNL_SYNC_MONOTONIC >= REALIZED_PNL_SYNC_INTERVAL_SECONDS:
+        symbol_for_pnl = symbol or DEFAULT_SYMBOL
+        try:
+            real_pnl, real_pnl_pct = get_realized_pnl(symbol_for_pnl)
+            MEMORY["total_pnl"] = real_pnl
+            MEMORY["total_pnl_pct"] = real_pnl_pct
+            _LAST_REALIZED_PNL_SYNC_MONOTONIC = now_mono
+        except Exception as exc:
+            log_execution(
+                f"[PNL_SYNC] realized PnL refresh failed: {type(exc).__name__}: {exc}",
+                "WARN", debounce_key="realized_pnl_sync_error", debounce_sec=60
+            )
 
 
 # Serialize final entry authorization so one closed-candle trigger cannot
