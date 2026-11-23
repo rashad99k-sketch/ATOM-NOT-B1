@@ -161,35 +161,34 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
 def _impulse_frame(side="BUY"):
     frame, now_ms = _cross_frame()
     direction = 1.0 if side == "BUY" else -1.0
-    # Fixed closed-candle EMA provider needs a genuine EMA9/15 cross at -2:
-    # keep a short pre-cross base, then align EMA9/15 with the cross direction.
-    frame.loc[len(frame)-4, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.04, 99.96, 100.0, 100.0
+    # Match the production EMA crossover detector: EMA9 rises above/falls below
+    # EMA15 at -3, then the following -2 candle is the confirmed impulse BOS.
+    cross_index = len(frame) - 3
+    base = 100.0
+    for i in range(len(frame) - 12, len(frame)):
+        if i < cross_index:
+            frame.loc[i, ["open", "high", "low", "close", "volume"]] = [
+                base, base + 0.04, base - 0.04, base, 100.0
+            ]
+    frame.loc[cross_index, ["open", "high", "low", "close", "volume"]] = [
+        base, base + 0.16 * direction, base - 0.16 * direction,
+        base + 0.10 * direction, 100.0
     ]
-    frame.loc[len(frame)-3, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.04, 99.96, 100.0, 100.0
-    ]
-    frame.loc[len(frame)-2, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.15 if side == "BUY" else 100.05,
-        99.95 if side == "BUY" else 99.85,
-        100.10 if side == "BUY" else 99.90, 100.0
-    ]
-    frame.loc[len(frame)-1, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.25 if side == "BUY" else 100.05,
-        99.95 if side == "BUY" else 99.75,
-        100.20 if side == "BUY" else 99.80, 100.0
-    ]
-    # The final candle is the impulse BOS with sufficient range and volume.
-    prior = frame.iloc[-11:-1]
-    level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
+    level = 100.10 if side == "BUY" else 99.90
     open_price = level - 1.00 * direction
     close_price = level + 1.00 * direction
     low = min(open_price, close_price) - 0.05
     high = max(open_price, close_price) + 0.05
-    frame.loc[len(frame)-1, ["open", "high", "low", "close", "volume"]] = [
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
         open_price, high, low, close_price, 300.0
     ]
-    live = close_price + 0.05 * direction
+    # The last candle is a small continuation after the impulse; the gate must
+    # still evaluate the impulse candle's own BOS and quality metrics.
+    frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
+        close_price, close_price + 0.08 * direction,
+        close_price - 0.02 * direction, close_price + 0.05 * direction, 100.0
+    ]
+    live = close_price + 0.06 * direction
     return frame, int(frame.timestamp.iloc[-1] + 901_000), live
 
 
