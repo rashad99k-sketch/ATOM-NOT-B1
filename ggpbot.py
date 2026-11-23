@@ -10390,7 +10390,11 @@ def health():
     heartbeat_ts = safe_float(runtime_state.get("heartbeat_ts"), 0.0)
     heartbeat_age = max(0.0, time.time() - heartbeat_ts) if heartbeat_ts > 0 else None
     runtime_status = str(runtime_state.get("status") or "NOT_STARTED")
-    if runtime_status == "RUNNING" and (heartbeat_age is None or heartbeat_age > 90.0):
+    started_at = safe_float(runtime_state.get("started_at"), 0.0)
+    startup_age = max(0.0, time.time() - started_at) if started_at > 0 else None
+    if runtime_status == "RUNNING" and heartbeat_age is None and startup_age is not None and startup_age <= 180.0:
+        runtime_status = "STARTING"
+    elif runtime_status == "RUNNING" and (heartbeat_age is None or heartbeat_age > 90.0):
         runtime_status = "STALE"
     return jsonify({
         "ok": True,
@@ -10422,8 +10426,10 @@ def runtime_health():
     heartbeat_age = max(0.0, now - heartbeat_ts) if heartbeat_ts > 0 else None
     startup_age = max(0.0, now - started_at) if started_at > 0 else None
     status = str(runtime_state.get("status") or "NOT_STARTED")
-    ready = status == "RUNNING" and heartbeat_age is not None and heartbeat_age <= 90.0
-    if status == "STARTING" and startup_age is not None and startup_age <= 180.0:
+    thread_alive = bool(runtime_state.get("thread_alive", False))
+    ready = (status == "RUNNING" and heartbeat_age is not None
+             and heartbeat_age <= 90.0 and thread_alive)
+    if status in {"STARTING", "RUNNING"} and heartbeat_age is None and startup_age is not None and startup_age <= 180.0 and thread_alive:
         ready = True
     if status == "RUNNING" and not ready:
         status = "STALE"
