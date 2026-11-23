@@ -350,7 +350,7 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 allowed_stages = {
                     "WAITING_FOR_PULLBACK", "WAITING_FOR_REJECTION",
                     "WAITING_FOR_CONTINUATION_BREAK", "WAITING_FOR_RECLAIM",
-                    "MICRO_PULLBACK_READY",
+                    "MICRO_PULLBACK_READY", "RETEST_READY",
                     "MACRO_PULLBACK_READY",
                 }
                 if (
