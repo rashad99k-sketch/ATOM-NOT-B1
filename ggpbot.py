@@ -12143,8 +12143,9 @@ def smart_opportunity_selection():
                 "entry_behavior_reasons": list(item.get("entry_behavior_reasons") or market_intelligence.get("reason_codes") or []),
                 "market_intelligence": dict(market_intelligence),
 
-                "pullback_type": next((x.split(":", 1)[0] for x in evidence
-                                        if any(t in x.lower() for t in ("pullback:", "retest:", "micro_pullback:"))), None),
+                "pullback_type": next((
+                    x.split(":", 1)[1] for x in evidence if x.startswith("pullback_type:")
+                ), None),
                 "exchange_symbol": exchange_sym,
                 "candle_timeframe": str(INTERVAL),
                 "closed_candle_frame": closed_df.copy(),

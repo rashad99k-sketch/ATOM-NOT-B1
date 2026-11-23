@@ -923,7 +923,7 @@ def validate_ema915_vwap_pullback_entry_gate(
             "cross_age_bars": cross_age_bars,
             "signal_candle_timestamp": signal_ts,
             "signal_candle_id": f"{direction}:EMA915_REVERSAL:{cross_ts}:SWEEP:{sweep_timestamp}:EVENT:{event_fragment}:TRIGGER:{signal_ts}",
-            "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
+            "ema9": e9_now, "ema15": e15_now, "ema50": e50_now, "vwap": vwap_now, "atr": atr,
             "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
             "institutional_origin_timestamp": sweep_timestamp,
             "liquidity_sweep_confirmed": True,
@@ -2024,6 +2024,7 @@ def validate_ema915_vwap_location_first_entry_gate(
         close = closed["close"].astype(float)
         ema9 = pd.Series(ema_fn(close, 9), index=closed.index, dtype=float)
         ema15 = pd.Series(ema_fn(close, 15), index=closed.index, dtype=float)
+        ema50 = pd.Series(ema_fn(close, 50), index=closed.index, dtype=float)
         tr = pd.concat([
             (closed["high"] - closed["low"]).rename("hl"),
             (closed["high"] - closed["close"].shift(1)).abs().rename("hc"),
@@ -2031,6 +2032,7 @@ def validate_ema915_vwap_location_first_entry_gate(
         ], axis=1).max(axis=1)
         atr = float(tr.rolling(14, min_periods=14).mean().iloc[-1])
         e9_now, e15_now, vwap_now = float(ema9.iloc[-1]), float(ema15.iloc[-1]), float(vwap.iloc[-1])
+        e50_now = float(ema50.iloc[-1]) if np.isfinite(float(ema50.iloc[-1])) else None
     except Exception as exc:
         result["reason"] = f"indicator_calculation_failed:{type(exc).__name__}"
         return result
@@ -2099,15 +2101,48 @@ def validate_ema915_vwap_location_first_entry_gate(
         band_high = max(float(ema9.iloc[idx]), float(ema15.iloc[idx]), float(vwap.iloc[idx]))
         candle_low = float(closed["low"].iloc[idx])
         candle_high = float(closed["high"].iloc[idx])
-        if candle_low <= band_high + 0.15 * atr and candle_high >= band_low - 0.15 * atr:
-            touch_indices.append(idx)
+        micro_touch = (
+            candle_low <= band_high + 0.15 * atr
+            and candle_high >= band_low - 0.15 * atr
+        )
+        e50_value = float(ema50.iloc[idx]) if np.isfinite(float(ema50.iloc[idx])) else None
+        macro_touch = (
+            e50_value is not None
+            and candle_low <= e50_value + 0.15 * atr
+            and candle_high >= e50_value - 0.15 * atr
+        )
+        # A deep excursion through the fast EMA/VWAP band to EMA50 is tagged
+        # MACRO_PULLBACK; ordinary retests stay MICRO_RETEST.
+        if macro_touch and (
+            not micro_touch
+            or (direction == "BUY" and candle_low < band_low - 0.15 * atr)
+            or (direction == "SELL" and candle_high > band_high + 0.15 * atr)
+        ):
+            touch_indices.append((idx, "MACRO_PULLBACK"))
+        elif micro_touch:
+            touch_indices.append((idx, "MICRO_RETEST"))
     if not touch_indices:
         result.update({"reason": "waiting_for_pullback_touch",
                        "decision_state": "WAITING_FOR_PULLBACK"})
         return result
-    touch_idx = touch_indices[0]
+    touch_idx, pullback_type = touch_indices[0]
+    if pullback_type == "MACRO_PULLBACK":
+        touch_level = float(ema50.iloc[touch_idx])
+        pullback_zone_low = touch_level - 0.15 * atr
+        pullback_zone_high = touch_level + 0.15 * atr
+    else:
+        pullback_zone_low = min(
+            float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
+        ) - 0.15 * atr
+        pullback_zone_high = max(
+            float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
+        ) + 0.15 * atr
     result.update({
         "pullback_touch": True,
+        "macro_pullback_touch": pullback_type == "MACRO_PULLBACK",
+        "pullback_type": pullback_type,
+        "pullback_zone_low": pullback_zone_low,
+        "pullback_zone_high": pullback_zone_high,
         "pullback_timestamp": int(closed["timestamp"].iloc[touch_idx]),
         "pullback_low": float(closed["low"].iloc[touch_idx]),
         "pullback_high": float(closed["high"].iloc[touch_idx]),
@@ -2152,7 +2187,10 @@ def validate_ema915_vwap_location_first_entry_gate(
         "continuation_break": True,
         "signal_candle_timestamp": latest_ts,
         "signal_candle_id": f"{cross_ts}:{int(result['pullback_timestamp'])}:{int(result['rejection_timestamp'])}:{latest_ts}",
-        "entry_mode": "PULLBACK_RETEST_REJECTION_BREAK",
+        "entry_mode": (
+            "MACRO_PULLBACK_REJECTION_BREAK" if pullback_type == "MACRO_PULLBACK"
+            else "PULLBACK_RETEST_REJECTION_BREAK"
+        ),
     })
 
     live = float(current_price) if current_price is not None else last_close
@@ -2285,7 +2323,7 @@ def validate_ema915_vwap_location_first_entry_gate(
         "location_status": "CLEAR" if opposing else "UNKNOWN_NON_BLOCKING",
         "location_reason": "opposing_zone_clear" if opposing else "no_confirmed_opposing_zone; non_blocking",
         "opposing_zones_checked": opposing,
-        "entry_zone_low": min(e9_now, e15_now, vwap_now) - 0.15 * atr,
-        "entry_zone_high": max(e9_now, e15_now, vwap_now) + 0.15 * atr,
+        "entry_zone_low": float(result.get("pullback_zone_low")),
+        "entry_zone_high": float(result.get("pullback_zone_high")),
     })
     return result
