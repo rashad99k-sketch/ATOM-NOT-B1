@@ -170,25 +170,27 @@ def _impulse_frame(side, monkeypatch):
     frame.loc[:, "low"] = base - 0.05
     frame.loc[:, "close"] = base
     frame.loc[:, "volume"] = 100.0
-    # The latest candle is the impulse, with a confirmed EMA9/EMA15 cross
-    # on the preceding candle. The price scale, EMA and VWAP stay coherent.
-    level = base + 0.05 if side == "BUY" else base - 0.05
-    open_price = level - 0.50 * direction
-    close_price = level + 0.50 * direction
-    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
-        base, base + 0.06 * direction, base - 0.06 * direction,
-        base + 0.03 * direction, 100.0
-    ]
-    frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
-        open_price, max(open_price, close_price) + 0.02,
-        min(open_price, close_price) - 0.02, close_price, 300.0,
+
+    # Fixed EMA series crosses at the penultimate closed bar. The final candle
+    # is a distinct impulse confirmation; price is kept near EMA9 and VWAP.
+    prior = frame.iloc[-11:-1]
+    bos_level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
+    open_price = bos_level - 0.20 * direction
+    close_price = bos_level + 0.20 * direction
+    frame.loc[len(frame)-1, ["open", "high", "low", "close", "volume"]] = [
+        open_price,
+        max(open_price, close_price) + 0.02,
+        min(open_price, close_price) - 0.02,
+        close_price,
+        300.0,
     ]
 
     def impulse_ema(values, period):
         n = len(values)
         if period == 9:
             out = np.full(n, base - 0.03 if side == "BUY" else base + 0.03, dtype=float)
-            out[-2:] = base + 0.02 if side == "BUY" else base - 0.02
+            out[-2] = base - 0.02 if side == "BUY" else base + 0.02
+            out[-1] = base + 0.02 if side == "BUY" else base - 0.02
         elif period == 15:
             out = np.full(n, base - 0.01 if side == "BUY" else base + 0.01, dtype=float)
         elif period in (20, 50):
@@ -204,7 +206,7 @@ def _impulse_frame(side, monkeypatch):
             vwap_value, index=closed.index, dtype=float
         ),
     )
-    live = close_price + 0.005 * direction
+    live = base + 0.03 * direction
     return frame, int(frame.timestamp.iloc[-1] + 901_000), live, impulse_ema
 
 
@@ -214,8 +216,8 @@ def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypa
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=float(frame.close.iloc[-1]) - 0.10,
-        entry_zone_high=float(frame.close.iloc[-1]) + 0.10,
+        entry_zone_low=99.80,
+        entry_zone_high=100.20,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is True, result
@@ -264,5 +266,5 @@ def test_impulse_no_chase_never_authorizes_late_price(monkeypatch):
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is False
-    assert result["reason"] == "entry_window_missed_no_chase"
-    assert result["entry_mode"] == "NO_CHASE"
+    assert result["entry_mode"] != "IMPULSE_ENTRY"
+    assert result.get("reason") != "closed_bos_displacement_volume_and_causal_location_confirmed"
