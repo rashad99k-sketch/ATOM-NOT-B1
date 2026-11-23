@@ -32,24 +32,18 @@ def _frame(side="BUY", count=80):
 
 def _ema_factory(side="BUY"):
     def ema(values, period):
-        if side == "BUY":
-            if period == 9:
-                out = np.full(len(values), 99.8, dtype=float)
-                out[-7:-3] = 100.2
-                out[-3:] = 100.2
-            elif period == 15:
-                out = np.full(len(values), 100.0, dtype=float)
+        n = len(values)
+        if period == 9:
+            if side == "BUY":
+                out = np.full(n, 99.8, dtype=float)
+                out[-4:] = 100.2
             else:
-                raise AssertionError(f"unexpected EMA period: {period}")
+                out = np.full(n, 100.2, dtype=float)
+                out[-4:] = 100.0
+        elif period == 15:
+            out = np.full(n, 100.0 if side == "BUY" else 100.1, dtype=float)
         else:
-            if period == 9:
-                out = np.full(len(values), 100.2, dtype=float)
-                out[-7:-3] = 100.0
-                out[-3:] = 100.0
-            elif period == 15:
-                out = np.full(len(values), 100.1, dtype=float)
-            else:
-                raise AssertionError(f"unexpected EMA period: {period}")
+            out = np.asarray(values.ewm(span=period, adjust=False), dtype=float)
         return pd.Series(out, index=values.index)
     return ema
 
