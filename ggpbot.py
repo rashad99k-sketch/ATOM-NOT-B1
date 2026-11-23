@@ -10539,6 +10539,7 @@ def runtime_diagnostics():
             "task": tasks.get("global_discovery", {}),
         },
         "scanner_tasks": tasks,
+        "candidate_pipeline": dict(MEMORY.get("candidate_pipeline") or {}),
         "scanner_v2": {
             "state": MEMORY.get("scanner_v2_state", "UNKNOWN"),
             "last_scan_age_seconds": round(max(0.0, now - safe_float(MEMORY.get("scanner_v2_last_scan"), now)), 2)
