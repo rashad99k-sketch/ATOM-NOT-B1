@@ -160,11 +160,22 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
 
 def _impulse_frame(side="BUY"):
     frame, now_ms = _cross_frame()
-    # Keep the crossover event fresh, then create a distinct quality BOS candle.
-    # The candle closes beyond the preceding 10-candle swing with high volume.
     direction = 1.0 if side == "BUY" else -1.0
-    prior = frame.iloc[-11:-1]
-    level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
+    # Cross is visible on the latest closed candle, impulse is the next one.
+    cross_index = len(frame) - 2
+    base = 100.0
+    for i in range(len(frame) - 12, len(frame)):
+        if i < cross_index:
+            frame.loc[i, ["open", "high", "low", "close", "volume"]] = [
+                base, base + 0.04, base - 0.04, base, 100.0
+            ]
+    # Keep the final cross candle mildly directional to put EMA9/15 on the
+    # correct side; the following bar is the separate, high-quality BOS.
+    frame.loc[cross_index, ["open", "high", "low", "close", "volume"]] = [
+        base, base + 0.12 * direction, base - 0.12 * direction,
+        base + 0.06 * direction, 100.0
+    ]
+    level = 100.10 if side == "BUY" else 99.90
     open_price = level - 1.00 * direction
     close_price = level + 1.00 * direction
     low = min(open_price, close_price) - 0.05
@@ -172,7 +183,6 @@ def _impulse_frame(side="BUY"):
     frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
         open_price, high, low, close_price, 300.0
     ]
-    # Move current price modestly beyond the signal close without chasing.
     live = close_price + 0.05 * direction
     return frame, int(frame.timestamp.iloc[-1] + 901_000), live
 
