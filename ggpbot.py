@@ -10502,6 +10502,89 @@ def health():
         "telegram": TELEGRAM_NOTIFIER.status(),
     })
 
+@app.route("/runtime-diagnostics")
+def runtime_diagnostics():
+    """Read-only runtime snapshot. This endpoint performs no exchange/network calls."""
+    now = time.time()
+    runtime_state = MEMORY.get("runtime_supervisor") if isinstance(MEMORY.get("runtime_supervisor"), dict) else {}
+    discovery = MEMORY.get("discovery_scanner") if isinstance(MEMORY.get("discovery_scanner"), dict) else {}
+    watchlist_meta = MEMORY.get("ema9_vwap_proximity_scanner_meta") if isinstance(MEMORY.get("ema9_vwap_proximity_scanner_meta"), dict) else {}
+    flow = DASHBOARD_STATE.get("institutional_flow") if isinstance(DASHBOARD_STATE.get("institutional_flow"), dict) else {}
+    try:
+        tasks = {
+            str(name): {
+                **(dict(value) if isinstance(value, dict) else {"state": str(value)}),
+                "age_seconds": round(max(0.0, now - float(value.get("started_at", now))), 2)
+                    if isinstance(value, dict) and value.get("started_at") else None,
+            }
+            for name, value in list((MEMORY.get("scanner_tasks") or {}).items())
+        }
+    except Exception:
+        tasks = {"snapshot_status": "UNAVAILABLE"}
+    heartbeat_ts = safe_float(runtime_state.get("heartbeat_ts"), 0.0)
+    flow_updated = safe_float(flow.get("last_valid_update_ms"), 0.0) / 1000.0
+    account = DASHBOARD_ACCOUNT_SNAPSHOT.snapshot(now=now)
+    return jsonify({
+        "timestamp": now,
+        "runtime": {
+            "status": runtime_state.get("status", "NOT_STARTED"),
+            "heartbeat_age_seconds": round(max(0.0, now - heartbeat_ts), 2) if heartbeat_ts else None,
+            "loop_cycles": int(runtime_state.get("loop_cycles", 0) or 0),
+            "thread_alive": bool(runtime_state.get("thread_alive", False)),
+            "last_error": runtime_state.get("last_error"),
+        },
+        "discovery": {
+            **dict(discovery),
+            "stage_age_seconds": round(max(0.0, now - safe_float(discovery.get("last_progress_at"), now)), 2),
+            "task": tasks.get("global_discovery", {}),
+        },
+        "scanner_tasks": tasks,
+        "scanner_v2": {
+            "state": MEMORY.get("scanner_v2_state", "UNKNOWN"),
+            "last_scan_age_seconds": round(max(0.0, now - safe_float(MEMORY.get("scanner_v2_last_scan"), now)), 2)
+                if MEMORY.get("scanner_v2_last_scan") else None,
+            "buy_count": len(MEMORY.get("scanner_v2_buy", []) or []),
+            "sell_count": len(MEMORY.get("scanner_v2_sell", []) or []),
+        },
+        "rf": {
+            "last_scan_age_seconds": round(max(0.0, now - safe_float(MEMORY.get("last_scan"), now)), 2)
+                if MEMORY.get("last_scan") else None,
+            "candidate_count": len(MEMORY.get("rf_watchlist", []) or []),
+        },
+        "watchlist": {
+            "count": len(MEMORY.get("watchlist", {}) or {}),
+            "last_update": MEMORY.get("unified_watchlist_last_update"),
+            "refresh_ok": MEMORY.get("_unified_watchlist_refresh_ok"),
+            "last_batch_count": MEMORY.get("unified_watchlist_last_batch_count"),
+            "stop_reason": MEMORY.get("unified_watchlist_stop_reason"),
+            "proximity_count": len(MEMORY.get("ema9_vwap_proximity_scanner", []) or []),
+            "proximity_meta": dict(watchlist_meta),
+        },
+        "m15_radar": {
+            "count": len(MEMORY.get("m15_crossover_radar", []) or []),
+            "setup_count": len(MEMORY.get("m15_setup_watchlist", []) or []),
+            "meta": dict(MEMORY.get("m15_crossover_radar_meta") or {}),
+        },
+        "institutional_flow": {
+            "status": flow.get("status", "DATA_UNAVAILABLE"),
+            "reason": flow.get("reason"),
+            "source_symbol": flow.get("source_symbol"),
+            "source_timeframe": flow.get("source_timeframe"),
+            "last_valid_age_seconds": round(max(0.0, now - flow_updated), 2) if flow_updated else None,
+        },
+        "entry_safety": {
+            "discovery_paused": bool(_discovery_paused()),
+            "recovery_block_entries": bool(globals().get("RECOVERY_BLOCK_ENTRIES", False)),
+            "position_status": MEMORY.get("position_status"),
+            "recovery_status": MEMORY.get("recovery_status"),
+            "local_position_open": bool(STATE.get("open")),
+            "trade_state_in_position": bool(TRADE_STATE.get("in_position")),
+        },
+        "account_snapshot": account,
+        "api_backoff": dict(globals().get("_LAST_API_RATE_LIMIT", {}) or {}),
+    }), 200
+
+
 @app.route("/runtime-health")
 def runtime_health():
     runtime_state = MEMORY.get("runtime_supervisor") if isinstance(MEMORY.get("runtime_supervisor"), dict) else {}
@@ -12445,7 +12528,8 @@ def run_global_discovery_scanner():
     """
     started = time.time()
     meta = MEMORY.setdefault("discovery_scanner", {})
-    meta.update({"state": "RUNNING", "last_started": started, "symbols_scanned": 0,
+    meta.update({"state": "RUNNING", "stage": "LOAD_UNIVERSE", "last_started": started,
+                 "last_progress_at": started, "symbols_scanned": 0,
                  "universe_limit": SCANNER_UNIVERSE_MAX})
     if _discovery_paused():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
@@ -12458,6 +12542,7 @@ def run_global_discovery_scanner():
         symbols = list(dict.fromkeys(list(symbols) + retained[:80]))
     except Exception as retain_exc:
         log_execution(f"[M15_CROSSOVER] retained-candidate load failed: {type(retain_exc).__name__}", "WARN")
+    meta.update({"stage": "SCANNER_V2", "last_progress_at": time.time(), "symbols_total": len(symbols)})
     with _SCANNER_FRAME_CACHE_LOCK:
         _SCANNER_FRAME_CACHE.clear()
     if not symbols:
@@ -12469,6 +12554,8 @@ def run_global_discovery_scanner():
         meta.update({"state": "PAUSED_FOR_POSITION", "last_completed": time.time()})
         return
     run_scanner_v2(symbols=symbols)
+    meta.update({"stage": "PROFESSIONAL_SCAN", "last_progress_at": time.time(),
+                 "scanner_v2_completed_at": time.time()})
     if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
@@ -12506,6 +12593,7 @@ def run_global_discovery_scanner():
     if _discovery_paused():
         meta.update({"state": "YIELDED_TO_POSITION", "last_completed": time.time()})
         return
+    meta.update({"stage": "RF_SCAN", "last_progress_at": time.time()})
     rf_candidates = scan_market_rf(top_n=40, symbols=symbols)
     MEMORY["rf_watchlist"] = rf_candidates[:30]
     MEMORY["last_scan"] = time.time()
@@ -12518,6 +12606,8 @@ def run_global_discovery_scanner():
         "role": "DISCOVERY_HINT_ONLY",
     } for item in rf_candidates[:30]]
 
+    meta.update({"stage": "RADAR", "last_progress_at": time.time(),
+                 "rf_completed_at": time.time(), "rf_candidates": len(rf_candidates)})
     # Radar is intentionally applied only to the highest-ranked distinct names.
     radar_candidates = []
     top_symbols = []
@@ -12573,7 +12663,8 @@ def run_global_discovery_scanner():
     MEMORY["top_candidates"] = blended[:60]
 
     meta.update({
-        "state": "IDLE", "last_completed": time.time(), "symbols_scanned": len(symbols),
+        "state": "IDLE", "stage": "COMPLETE", "last_completed": time.time(),
+        "last_progress_at": time.time(), "symbols_scanned": len(symbols),
         "professional_candidates": len(pro_candidates), "professional_valid_data": pro_stats.get("valid_data", 0),
         "rf_candidates": len(rf_candidates),
         "buy_candidates": len(MEMORY.get("scanner_v2_buy", [])),
