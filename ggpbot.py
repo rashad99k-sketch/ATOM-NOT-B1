@@ -11620,6 +11620,7 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                         )
                         _stage_map = {
                             "waiting_for_post_cross_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_ema_band_pullback": "WAITING_FOR_PULLBACK",
                             "waiting_for_ema_band_or_macro_pullback": "WAITING_FOR_PULLBACK",
                             "waiting_for_directional_rejection": "WAITING_FOR_REJECTION",
                             "waiting_for_continuation_break": "WAITING_FOR_CONTINUATION_BREAK",
