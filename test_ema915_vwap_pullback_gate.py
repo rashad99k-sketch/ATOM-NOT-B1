@@ -385,3 +385,25 @@ def test_macro_alignment_exception_never_weakens_reversal_vwap_gate(monkeypatch)
     assert result["macro_trend_aligned"] is True
     assert result["ready"] is False
     assert result["reason"] == "ema915_or_vwap_direction_not_aligned"
+
+
+def test_macro_retest_is_invalidated_if_protected_swing_breaks_before_rejection(monkeypatch):
+    frame = _macro_frame()
+    # The retest touches the causal zone on candle 77, but candle 78 closes
+    # decisively through the pre-cross swing low before any rejection can form.
+    frame.loc[78, ["open", "high", "low", "close"]] = [99.8, 100.0, 97.5, 97.8]
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.7,
+        cross_lookback_candles=8, pullback_lookback_candles=5,
+        entry_zone_low=98.8, entry_zone_high=99.3,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[73]),
+    )
+    assert result["ready"] is False
+    assert result["entry_mode"] == "INVALIDATED"
+    assert result["reason"] == "retest_swing_invalidated"
+    assert result["retest_invalidated"] is True
