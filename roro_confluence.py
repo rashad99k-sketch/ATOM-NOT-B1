@@ -2132,31 +2132,18 @@ def validate_ema915_vwap_location_first_entry_gate(
         result.update({"reason": "waiting_for_pullback_touch",
                        "decision_state": "WAITING_FOR_PULLBACK"})
         return result
-    touch_idx, pullback_type = touch_indices[0]
-    if pullback_type == "MACRO_PULLBACK":
-        touch_level = float(ema50.iloc[touch_idx])
-        pullback_zone_low = touch_level - 0.15 * atr
-        pullback_zone_high = touch_level + 0.15 * atr
-    else:
-        pullback_zone_low = min(
-            float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
-        ) - 0.15 * atr
-        pullback_zone_high = max(
-            float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
-        ) + 0.15 * atr
+    first_touch_idx, first_pullback_type = touch_indices[0]
     result.update({
         "pullback_touch": True,
-        "macro_pullback_touch": pullback_type == "MACRO_PULLBACK",
-        "pullback_type": pullback_type,
-        "pullback_zone_low": pullback_zone_low,
-        "pullback_zone_high": pullback_zone_high,
-        "pullback_timestamp": int(closed["timestamp"].iloc[touch_idx]),
-        "pullback_low": float(closed["low"].iloc[touch_idx]),
-        "pullback_high": float(closed["high"].iloc[touch_idx]),
+        "macro_pullback_touch": first_pullback_type == "MACRO_PULLBACK",
+        "pullback_type": first_pullback_type,
+        "pullback_timestamp": int(closed["timestamp"].iloc[first_touch_idx]),
     })
 
     rejection_idx = None
-    for idx in range(touch_idx + 1, last_idx):
+    touch_idx = first_touch_idx
+    pullback_type = first_pullback_type
+    for idx in range(first_touch_idx + 1, last_idx):
         o = float(closed["open"].iloc[idx]); h = float(closed["high"].iloc[idx])
         lo = float(closed["low"].iloc[idx]); c = float(closed["close"].iloc[idx])
         span = max(h - lo, 1e-12)
@@ -2167,8 +2154,32 @@ def validate_ema915_vwap_location_first_entry_gate(
         else:
             confirmed = c < o and c < float(vwap.iloc[idx]) and upper_wick >= 0.10
         if confirmed:
-            rejection_idx = idx
-            break
+            prior_touches = [touch for touch in touch_indices if touch[0] < idx]
+            if prior_touches:
+                touch_idx, pullback_type = prior_touches[-1]
+                rejection_idx = idx
+                break
+    if rejection_idx is not None:
+        if pullback_type == "MACRO_PULLBACK":
+            touch_level = float(ema50.iloc[touch_idx])
+            pullback_zone_low = touch_level - 0.15 * atr
+            pullback_zone_high = touch_level + 0.15 * atr
+        else:
+            pullback_zone_low = min(
+                float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
+            ) - 0.15 * atr
+            pullback_zone_high = max(
+                float(ema9.iloc[touch_idx]), float(ema15.iloc[touch_idx]), float(vwap.iloc[touch_idx])
+            ) + 0.15 * atr
+        result.update({
+            "macro_pullback_touch": pullback_type == "MACRO_PULLBACK",
+            "pullback_type": pullback_type,
+            "pullback_zone_low": pullback_zone_low,
+            "pullback_zone_high": pullback_zone_high,
+            "pullback_timestamp": int(closed["timestamp"].iloc[touch_idx]),
+            "pullback_low": float(closed["low"].iloc[touch_idx]),
+            "pullback_high": float(closed["high"].iloc[touch_idx]),
+        })
     if rejection_idx is None:
         result.update({"reason": "waiting_for_separate_directional_rejection",
                        "decision_state": "WAITING_FOR_REJECTION"})
