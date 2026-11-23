@@ -1043,6 +1043,13 @@ def validate_ema915_vwap_pullback_entry_gate(
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
+    pullback_ts = int(closed["timestamp"].iloc[pullback_idx])
+    result.update({
+        "pullback_touch": True, "pullback_timestamp": pullback_ts,
+        "entry_mode": pullback_type, "pullback_type": pullback_type,
+        "macro_pullback": pullback_type == "MACRO_PULLBACK",
+    })
+
     # The newest closed candle is reserved for breakout confirmation.
     rejection_idx = None
     for idx in range(pullback_idx + 1, len(closed) - 1):
