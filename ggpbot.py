@@ -11655,7 +11655,7 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                         _check["cross_age_bars"] = _cross_age_bars
                         _check["ema9_cross"] = _check.get("cross_direction")
                         _check["cross_fresh"] = bool(
-                            _cross_matches_side and _cross_age_bars is not None and _cross_age_bars <= 6
+                            _cross_matches_side and _cross_age_bars is not None and _cross_age_bars <= 8
                         )
                         _stage_map = {
                             "waiting_for_post_cross_pullback": "WAITING_FOR_PULLBACK",
