@@ -9929,6 +9929,7 @@ function updateUI(d) {{
         document.getElementById("proximity-scanner-panel").innerHTML = "Waiting for scanner data";
     }}
     const radarRows = d.m15_crossover_radar || [];
+    const radarMeta = d.m15_crossover_radar_meta || {{}};
     const radarEsc = value => String(value ?? "—").replace(/[&<>]/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;"}}[ch]));
     const radarChart = item => {{
       const c = item.chart;
@@ -9954,7 +9955,7 @@ function updateUI(d) {{
       if (c.intrabar_marker) marker += `<line x1="${{width-pad}}" y1="${{pad}}" x2="${{width-pad}}" y2="${{height-pad}}" stroke="#b58cff" stroke-dasharray="4 3"><title>Provisional intrabar cross; not confirmed</title></line>`;
       return `<svg viewBox="0 0 ${{width}} ${{height}}" style="width:100%;max-width:520px;height:auto;background:#0a1019;border-radius:5px;">${{polylines}}${{marker}}</svg><small style="color:#9ca3af">Price gray · EMA9 green · EMA15 amber · Session VWAP blue · Closed cross dot · Provisional intrabar dashed line</small>`;
     }};
-    document.getElementById("m15-crossover-panel").innerHTML = radarRows.length ? radarRows.map(item => {{
+    const radarCards = radarRows.length ? radarRows.map(item => {{
       const state = item.crossover_status || "UNKNOWN";
       const color = state === "CROSS_CONFIRMED" ? "#00d084" : state === "CROSS_DETECTED" ? "#48a9ff" : state === "PRE_CROSS" ? "#f1c40f" : "#94a3b8";
       const liq = item.liquidity_status || "UNAVAILABLE";
@@ -9968,7 +9969,25 @@ function updateUI(d) {{
         ${{radarChart(item)}}<br>${{snapshot}}<small>${{snapshotHistory}}</small><br><small>Triple: ${{radarEsc(triple.status)}} · VWAP event: ${{radarEsc(triple.vwap_event_type)}} · Bars apart: ${{radarEsc(triple.bars_between_events)}} · ADX ${{radarEsc(item.adx)}} · DI+ ${{radarEsc(item.di_plus)}} / DI- ${{radarEsc(item.di_minus)}} · Pullback zone ${{radarEsc(item.pullback_zone?.low)}}–${{radarEsc(item.pullback_zone?.high)}}</small><br><small>Price ${{radarEsc(item.current_price)}} · EMA9 ${{radarEsc(item.ema9)}} · EMA15 ${{radarEsc(item.ema15)}} · Session VWAP ${{radarEsc(item.session_vwap)}} · EMA gap/ATR ${{radarEsc(item.ema_distance_atr)}} · ATR ${{radarEsc(item.atr)}} · Relative volume ${{radarEsc(item.volume_ratio)}}</small><br>
         <small>Liquidity ${{radarEsc(liq)}} · Regime ${{radarEsc(regime)}} · OB ${{radarEsc(ob)}} · FVG ${{radarEsc(fvg)}} · Setup state ${{radarEsc(item.institutional_setup_state)}} · Reason ${{radarEsc(item.rejection_reason || item.institutional_rejection_reason)}}</small><br>
         <small>Closed M15 confirmation: ${{item.evidence?.closed_m15_confirmed ? "YES" : "NO"}} · Intrabar provisional: ${{item.evidence?.intrabar_only ? "YES (not confirmed)" : "NO"}} · Signal time ${{item.signal_timestamp_ms ? new Date(item.signal_timestamp_ms).toLocaleString() : "—"}} · Updated ${{item.last_update_ms ? new Date(item.last_update_ms).toLocaleTimeString() : "—"}}</small></details>`;
-    }}).join("") : "No early or confirmed M15 cross candidates; incomplete data is not displayed as zero.";
+    }}).join("");
+    const radarUpdated = radarMeta.last_update_ms ? new Date(radarMeta.last_update_ms).toLocaleTimeString() : "—";
+    const radarSummary = "<small>State: " + radarEsc(radarMeta.state || "NOT_STARTED")
+        + " · Processed frames: " + radarEsc(radarMeta.frames_processed_total ?? 0)
+        + " · Candidates: " + radarEsc(radarMeta.candidate_count ?? radarRows.length)
+        + " (confirmed " + radarEsc(radarMeta.confirmed_count ?? 0)
+        + ", early " + radarEsc(radarMeta.early_count ?? 0)
+        + ", provisional " + radarEsc(radarMeta.provisional_count ?? 0)
+        + ") · Updated: " + radarUpdated
+        + " · Source: " + radarEsc(radarMeta.source || "—") + "</small><hr>";
+    const radarEmptyMessage = radarMeta.state === "PARTIAL_DATA"
+        ? "M15 scanner received incomplete data for " + radarEsc(radarMeta.last_symbol)
+          + "; previous valid candidates are retained. Reason: " + radarEsc(radarMeta.last_data_error)
+        : radarMeta.state === "NO_CANDIDATES"
+            ? "Scanner is active on shared closed M15 frames; no fresh or pre-cross candidates currently qualify."
+            : radarMeta.state === "NOT_STARTED"
+                ? "Waiting for Scanner-2 to supply its first shared closed M15 frame; no duplicate exchange scan is running."
+                : "No qualifying M15 candidates in the latest shared-frame update.";
+    document.getElementById("m15-crossover-panel").innerHTML = radarSummary + (radarCards || radarEmptyMessage);
     if(d.watchlist) {{
         let wHtml = "";
         for (let sym in d.watchlist) {{
@@ -10024,21 +10043,30 @@ function updateUI(d) {{
         }});
     }}
     document.getElementById("no-entry-feed").innerHTML = noEntryHtml || "No recent skips";
-    if(d.institutional_flow) {{
-        let flow = d.institutional_flow;
-        document.getElementById("flow-banker").innerHTML = flow.banker_pressure.toFixed(1);
-        document.getElementById("flow-retail").innerHTML = flow.retailer_pressure.toFixed(1);
-        document.getElementById("flow-hot").innerHTML = flow.hot_money.toFixed(1);
-        document.getElementById("flow-bias").innerHTML = flow.institutional_bias_detailed || flow.institutional_bias;
-        document.getElementById("flow-align").innerHTML = flow.flow_alignment.toFixed(1);
-        document.getElementById("flow-dist").innerHTML = flow.distribution_risk.toFixed(1);
-        document.getElementById("flow-mom-health").innerHTML = flow.momentum_health.toFixed(1);
-        document.getElementById("flow-cont-str").innerHTML = flow.continuation_strength.toFixed(1);
-        document.getElementById("flow-exh-risk").innerHTML = flow.exhaustion_risk.toFixed(1);
-        document.getElementById("flow-climax").innerHTML = flow.climax_risk.toFixed(1);
-        document.getElementById("flow-greed").innerHTML = flow.greed_state ? "🚨 Yes" : "✅ No";
-        document.getElementById("flow-dom").innerHTML = flow.smart_money_dominant ? "✅ Yes" : "❌ No";
-    }}
+    const flow = d.institutional_flow || {{}};
+    const flowUsable = flow.status === "VALID" || flow.status === "STALE";
+    const flowNumber = key => flowUsable && flow[key] != null && Number.isFinite(Number(flow[key]))
+        ? Number(flow[key]).toFixed(1) : "—";
+    document.getElementById("flow-banker").innerText = flowNumber("banker_pressure");
+    document.getElementById("flow-retail").innerText = flowNumber("retailer_pressure");
+    document.getElementById("flow-hot").innerText = flowNumber("hot_money");
+    document.getElementById("flow-bias").innerText = flowUsable
+        ? (flow.institutional_bias_detailed || flow.institutional_bias || "—") : "—";
+    document.getElementById("flow-align").innerText = flowNumber("flow_alignment");
+    document.getElementById("flow-dist").innerText = flowNumber("distribution_risk");
+    document.getElementById("flow-mom-health").innerText = flowNumber("momentum_health");
+    document.getElementById("flow-cont-str").innerText = flowNumber("continuation_strength");
+    document.getElementById("flow-exh-risk").innerText = flowNumber("exhaustion_risk");
+    document.getElementById("flow-climax").innerText = flowNumber("climax_risk");
+    document.getElementById("flow-greed").innerText = flowUsable && typeof flow.greed_state === "boolean"
+        ? (flow.greed_state ? "🚨 Yes" : "✅ No") : "—";
+    document.getElementById("flow-dom").innerText = flowUsable && typeof flow.smart_money_dominant === "boolean"
+        ? (flow.smart_money_dominant ? "✅ Yes" : "❌ No") : "—";
+    const flowUpdated = flow.last_valid_update_ms ? new Date(flow.last_valid_update_ms).toLocaleString() : "—";
+    document.getElementById("flow-meta").innerText =
+        (flow.status || "DATA_UNAVAILABLE") + " · " + (flow.source_symbol || "source unavailable")
+        + " " + (flow.source_timeframe || "") + " · " + (flow.source || "no valid source")
+        + " · Last valid: " + flowUpdated + " · " + (flow.reason || "—");
 }}
 async function manualTrade(side){{ const r=await fetch('/trade',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{side:side}})}}); const res=await r.json(); alert(res.message); }}
 async function manualClose(){{ const r=await fetch('/close',{{method:'POST'}}); const res=await r.json(); alert(res.message); }}
