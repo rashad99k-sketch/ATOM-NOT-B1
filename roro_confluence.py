@@ -1,5 +1,5 @@
-"""Closed-candle EMA9 + UTC Session VWAP + existing strong-zone + liquidity confluence.
-This module does not place orders. The caller remains responsible for execution.
+"""Closed-candle EMA9/EMA15 + UTC Session VWAP entry authority and location filters.
+Institutional zones provide opposing-location context only; this module never places orders.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field

@@ -879,7 +879,7 @@ def update_unified_watchlist(memory: Dict[str, Any], fetch_frame,
             0.0 <= cross_age <= cross_max_age
             and bool(proximity.get("cross_fresh", True))
         )
-        # Crosses affect ordering only; structural EntryAuthority remains final.
+        # Crosses affect candidate ordering; the closed-bar EMA/VWAP gate is the entry authority.
         vwap_cross_priority = (
             0.65 if cross_fresh and cross_direction and cross_direction == expected_cross
             else -0.35 if cross_fresh and cross_direction and expected_cross and cross_direction != expected_cross
