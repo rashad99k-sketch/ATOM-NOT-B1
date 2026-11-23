@@ -164,55 +164,59 @@ def _impulse_frame(side, monkeypatch):
 
     frame, _ = _cross_frame()
     direction = 1.0 if side == "BUY" else -1.0
-    frame.loc[:, "open"] = 100.0
-    frame.loc[:, "high"] = 100.05
-    frame.loc[:, "low"] = 99.95
-    frame.loc[:, "close"] = 100.0
+    base = 100.0
+    frame.loc[:, "open"] = base
+    frame.loc[:, "high"] = base + 0.05
+    frame.loc[:, "low"] = base - 0.05
+    frame.loc[:, "close"] = base
     frame.loc[:, "volume"] = 100.0
 
-    # The crossover is on the previous completed candle; the latest candle is
-    # the distinct impulse/BOS confirmation.
-    frame.loc[len(frame)-2, ["open", "high", "low", "close", "volume"]] = [
-        100.0, 100.08 if side == "BUY" else 100.0,
-        100.0 if side == "BUY" else 99.92,
-        100.04 if side == "BUY" else 99.96, 100.0
-    ]
+    # Most recent completed candle is the impulse; crossover happened one
+    # closed candle earlier in the injected EMA9/EMA15 series.
     prior = frame.iloc[-11:-1]
     level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
-    open_price = level - 1.00 * direction
-    close_price = level + 1.00 * direction
-    frame.loc[len(frame)-1, ["open", "high", "low", "close", "volume"]] = [
-        open_price, max(open_price, close_price) + 0.05,
-        min(open_price, close_price) - 0.05, close_price, 300.0
+    open_price = level - 0.18 * direction
+    close_price = level + 0.18 * direction
+    impulse_range = 0.40
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
+        base, base + 0.06 * direction, base - 0.06 * direction,
+        base + 0.03 * direction, 100.0
+    ]
+    frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
+        open_price,
+        max(open_price, close_price) + 0.02,
+        min(open_price, close_price) - 0.02,
+        close_price,
+        300.0,
     ]
 
+    # Use an internally consistent EMA cross very close to the current price.
     def impulse_ema(values, period):
         n = len(values)
         if period == 9:
             if side == "BUY":
-                out = np.full(n, 101.8, dtype=float)
-                out[-2:] = 102.0
+                out = np.full(n, close_price - 0.025, dtype=float)
+                out[-2:] = close_price - 0.015
             else:
-                out = np.full(n, 98.2, dtype=float)
-                out[-2:] = 98.0
+                out = np.full(n, close_price + 0.025, dtype=float)
+                out[-2:] = close_price + 0.015
         elif period == 15:
-            out = np.full(n, 101.9 if side == "BUY" else 98.1, dtype=float)
+            out = np.full(n, close_price - 0.010 if side == "BUY" else close_price + 0.010, dtype=float)
         elif period in (20, 50):
-            out = np.full(n, 100.0, dtype=float)
+            out = np.full(n, close_price - 0.10 if side == "BUY" else close_price + 0.10, dtype=float)
         else:
             out = values.ewm(span=period, adjust=False).mean().to_numpy(dtype=float)
         return pd.Series(out, index=values.index)
 
+    vwap_value = close_price - 0.08 if side == "BUY" else close_price + 0.08
     monkeypatch.setattr(
         confluence,
         "compute_session_vwap",
         lambda closed, timeframe_seconds, now_ms=None: pd.Series(
-            100.5 if side == "SELL" else 99.5,
-            index=closed.index,
-            dtype=float,
+            vwap_value, index=closed.index, dtype=float
         ),
     )
-    live = close_price + 0.02 * direction
+    live = close_price + 0.005 * direction
     return frame, int(frame.timestamp.iloc[-1] + 901_000), live, impulse_ema
 
 
