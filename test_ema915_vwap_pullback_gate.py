@@ -305,7 +305,7 @@ def test_macro_pullback_cannot_use_zone_before_zone_creation_timestamp(monkeypat
 
 def test_macro_pullback_requires_a_confirmed_pre_cross_swing(monkeypatch):
     frame = _macro_frame()
-    frame.loc[70, "low"] = 99.8
+    frame.loc[70, ["open", "high", "low", "close"]] = [99.9, 100.0, 99.8, 99.9]
     monkeypatch.setattr(
         confluence, "compute_session_vwap",
         lambda closed, timeframe_seconds, now_ms=None: pd.Series(99.5, index=closed.index, dtype=float),
