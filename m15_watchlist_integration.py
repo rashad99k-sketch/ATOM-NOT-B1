@@ -125,7 +125,9 @@ def process_m15_watchlist_frame(
             return copy.deepcopy(stale_row)
 
         row = evaluate_m15_radar(key, closed_frame, now_ms=now_ms)
-        if row.get("crossover_status") == "DATA_UNAVAILABLE":
+        if (row.get("crossover_status") == "DATA_UNAVAILABLE"
+                or (row.get("crossover_status") == "EXPIRED"
+                    and row.get("rejection_reason") == "STALE_CLOSED_CANDLE_DATA")):
             _update_radar_meta(memory, now_ms=now_ms, symbol=key, data_unavailable=True,
                                reason=row.get("rejection_reason") or "DATA_UNAVAILABLE")
             return row
