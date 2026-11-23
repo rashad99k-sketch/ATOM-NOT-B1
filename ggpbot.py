@@ -11689,6 +11689,7 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                             "live_price_vwap_alignment_lost": "INVALIDATED",
                             "directional_vwap_or_ema_alignment_lost": "INVALIDATED",
                             "opposing_institutional_zone_blocks_available_room": "LOCATION_BLOCKED",
+                            "tp1_target_already_crossed_or_no_room": "ENTRY_WINDOW_MISSED",
                             "cross_window_expired": "CROSS_EXPIRED",
                             "pullback_window_expired": "CROSS_EXPIRED",
                             "missing_fresh_ema9_ema15_cross": "NO_FRESH_CROSS",

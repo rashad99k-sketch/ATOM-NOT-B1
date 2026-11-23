@@ -137,3 +137,10 @@ def test_closed_candle_freshness_is_required(monkeypatch):
     )
     assert result["ready"] is False
     assert result["reason"] == "stale_closed_candle_data"
+
+
+def test_tp1_already_crossed_cannot_authorize_late_entry(monkeypatch):
+    result = _run(monkeypatch, "BUY", target=101.0)
+    assert result["ready"] is False
+    assert result["decision_state"] == "NO_CHASE"
+    assert result["reason"] == "tp1_target_already_crossed_or_no_room"

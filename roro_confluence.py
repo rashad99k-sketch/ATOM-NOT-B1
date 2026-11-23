@@ -2216,6 +2216,16 @@ def validate_ema915_vwap_location_first_entry_gate(
             target = None
     except (TypeError, ValueError, OverflowError):
         target = None
+    if target is not None:
+        target_has_room = target > live if direction == "BUY" else target < live
+        if not target_has_room:
+            result.update({
+                "reason": "tp1_target_already_crossed_or_no_room",
+                "decision_state": "NO_CHASE",
+                "location_status": "TARGET_ROOM_INVALID",
+                "location_reason": "TP1 is no longer ahead of the live entry price",
+            })
+            return result
     for zone in zones:
         try:
             low = float(zone.get("low", zone.get("lower", zone.get("price", zone.get("level")))))
