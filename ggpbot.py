@@ -9908,16 +9908,16 @@ function updateUI(d) {{
     }}
     if(d.live_trade_mode && d.supervisor) {{
         const sup = d.supervisor;
-        document.getElementById("rf-sup-entry").innerText = sup.entry_price?.toFixed(4) || "-";
-        document.getElementById("rf-sup-mark").innerText = sup.mark_price?.toFixed(4) || "-";
-        document.getElementById("rf-sup-roe").innerHTML = sup.roe_pct?.toFixed(2) + "%";
-        document.getElementById("rf-sup-upnl").innerText = sup.unrealized_pnl?.toFixed(2) || "-";
-        document.getElementById("rf-sup-adx").innerText = sup.adx?.toFixed(1) || "-";
-        document.getElementById("rf-sup-dip").innerText = sup.di_plus?.toFixed(1) || "-";
-        document.getElementById("rf-sup-dim").innerText = sup.di_minus?.toFixed(1) || "-";
+        document.getElementById("rf-sup-entry").innerText = dashboardNumber(sup.entry_price, 4);
+        document.getElementById("rf-sup-mark").innerText = dashboardNumber(sup.mark_price, 4);
+        document.getElementById("rf-sup-roe").innerHTML = dashboardNumber(sup.roe_pct, 2) + "%";
+        document.getElementById("rf-sup-upnl").innerText = dashboardNumber(sup.unrealized_pnl, 2);
+        document.getElementById("rf-sup-adx").innerText = dashboardNumber(sup.adx, 1);
+        document.getElementById("rf-sup-dip").innerText = dashboardNumber(sup.di_plus, 1);
+        document.getElementById("rf-sup-dim").innerText = dashboardNumber(sup.di_minus, 1);
         document.getElementById("rf-sup-cont").innerText = sup.continuation_pressure || "-";
         document.getElementById("rf-sup-fail").innerText = sup.thesis_failure_score || "-";
-        document.getElementById("rf-sup-conf").innerText = sup.current_confidence?.toFixed(1) || "-";
+        document.getElementById("rf-sup-conf").innerText = dashboardNumber(sup.current_confidence, 1);
         document.getElementById("rf-sup-tp1").innerHTML = sup.tp1_hit ? "✅" : "❌";
         document.getElementById("rf-sup-tp2").innerHTML = sup.tp2_hit ? "✅" : "❌";
         document.getElementById("rf-sup-trail").innerHTML = sup.trailing_active ? "✅" : "❌";
@@ -9930,7 +9930,7 @@ function updateUI(d) {{
         let reclaimClass = "rf-live-pill-risk-low";
         if (reclaim > 0.6) reclaimClass = "rf-live-pill-risk-high";
         else if (reclaim > 0.3) reclaimClass = "rf-live-pill-risk-mid";
-        document.getElementById("rf-pill-reclaim").innerHTML = `🟢 RECLAIM ${{(reclaim*100).toFixed(0)}}%`;
+        document.getElementById("rf-pill-reclaim").innerHTML = `🟢 RECLAIM ${{dashboardNumber(Number(reclaim)*100, 0)}}%`;
         document.getElementById("rf-pill-reclaim").className = `rf-live-pill ${{reclaimClass}}`;
         const trailActive = sup.trailing_active;
         document.getElementById("rf-pill-trail").innerHTML = trailActive ? "⚡ TRAILING ON" : "⚡ TRAILING OFF";
@@ -9942,7 +9942,7 @@ function updateUI(d) {{
     if(d.continuation_probability) {{
         let color = d.continuation_probability >= 0.65 ? "green" : (d.continuation_probability >= 0.5 ? "yellow" : "red");
         document.getElementById("continuation-panel").innerHTML = `
-            <div>Continuation: <span style="color:${{color}};">${{(d.continuation_probability*100).toFixed(1)}}%</span></div>
+            <div>Continuation: <span style="color:${{color}};">${{dashboardNumber(Number(d.continuation_probability)*100, 1)}}%</span></div>
             <div>Hold Quality: ${{d.hold_quality}}</div>
             <div>Trend Strength: ${{d.trend_strength}}</div>
             <div>Counter Pressure: ${{d.counter_pressure}}</div>
