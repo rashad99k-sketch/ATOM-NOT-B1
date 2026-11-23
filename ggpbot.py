@@ -11969,12 +11969,16 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
     return result
 
 def _discovery_paused():
-    """Fail-closed gate for discovery only; trade management and exchange sync remain live."""
+    """Pause market discovery only for known exposure; exchange uncertainty blocks entries, not observation.
+
+    RECOVERY_BLOCK_ENTRIES and position_status=UNKNOWN are authorization states,
+    not reasons to stop collecting market data. smart_opportunity_selection()
+    and execute_entry() retain the fail-closed recovery gate before any order.
+    """
     return bool(
         STATE.get("open")
         or TRADE_STATE.get("in_position")
-        or globals().get("RECOVERY_BLOCK_ENTRIES", False)
-        or MEMORY.get("position_status") in {"UNKNOWN", "MULTIPLE_OPEN"}
+        or MEMORY.get("position_status") == "MULTIPLE_OPEN"
     )
 
 
