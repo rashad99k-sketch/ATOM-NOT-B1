@@ -21,11 +21,13 @@ class DashboardAccountSnapshot:
     def update(self, balance, free_balance, *, source="BINGX_FUTURES", now=None):
         timestamp = time.time() if now is None else float(now)
         with self._lock:
+            if balance is not None:
+                self._data["balance"] = balance
+            if free_balance is not None:
+                self._data["free_balance"] = free_balance
             self._data.update({
-                "balance": balance,
-                "free_balance": free_balance,
                 "source": str(source),
-                "status": "VALID" if balance is not None and free_balance is not None else "PARTIAL",
+                "status": "VALID" if self._data.get("balance") is not None and self._data.get("free_balance") is not None else "PARTIAL",
                 "updated_at": timestamp,
                 "last_attempt_at": timestamp,
                 "last_error": None,
