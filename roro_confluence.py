@@ -948,7 +948,13 @@ def validate_ema915_vwap_pullback_entry_gate(
     except (TypeError, ValueError, OverflowError):
         macro_zone_low = macro_zone_high = None
     try:
-        zone_available_ts = int(entry_zone_available_timestamp) if entry_zone_available_timestamp is not None else None
+        zone_available_ts = float(entry_zone_available_timestamp) if entry_zone_available_timestamp is not None else None
+        if zone_available_ts is not None:
+            # OHLCV candle times in this project are milliseconds. Normalize
+            # second-based metadata from external zone providers before comparing.
+            if zone_available_ts < 100_000_000_000:
+                zone_available_ts *= 1000.0
+            zone_available_ts = int(zone_available_ts)
     except (TypeError, ValueError, OverflowError):
         zone_available_ts = None
     result.update({
