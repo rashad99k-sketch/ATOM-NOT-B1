@@ -89,3 +89,14 @@ def test_partial_account_refresh_preserves_last_known_other_balance_field():
     assert partial["balance"] == 125.0
     assert partial["free_balance"] == 90.0
     assert partial["status"] == "VALID"
+
+
+def test_dashboard_frontend_tolerates_missing_account_numbers_without_aborting_refresh():
+    source = _source()
+    assert "function dashboardNumber(value" in source
+    assert 'dashboardNumber(d.balance)' in source
+    assert 'dashboardNumber(d.free_balance)' in source
+    assert 'dashboardNumber(d.avail_margin)' in source
+    assert 'd.balance.toFixed(2)' not in source
+    assert 'd.free_balance.toFixed(2)' not in source
+    assert "fetch('/data', {{cache: 'no-store'}})" in source
