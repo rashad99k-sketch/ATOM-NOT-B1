@@ -644,6 +644,7 @@ def validate_ema915_vwap_pullback_entry_gate(
     institutional_origin_timestamp: Optional[int] = None,
     entry_zone_low: Optional[float] = None,
     entry_zone_high: Optional[float] = None,
+    entry_zone_available_timestamp: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Validate a closed-candle EMA9/EMA15 cross with setup-specific confirmation.
 
@@ -946,13 +947,21 @@ def validate_ema915_vwap_pullback_entry_gate(
             macro_zone_low, macro_zone_high = zone_low_arg, zone_high_arg
     except (TypeError, ValueError, OverflowError):
         macro_zone_low = macro_zone_high = None
-    result.update({"entry_zone_low": macro_zone_low, "entry_zone_high": macro_zone_high})
+    try:
+        zone_available_ts = int(entry_zone_available_timestamp) if entry_zone_available_timestamp is not None else None
+    except (TypeError, ValueError, OverflowError):
+        zone_available_ts = None
+    result.update({
+        "entry_zone_low": macro_zone_low, "entry_zone_high": macro_zone_high,
+        "entry_zone_available_timestamp": zone_available_ts,
+    })
     scan_start = max(cross_idx + 1, len(closed) - 1 - pullback_window)
 
     # Macro/deep pullback: require the validated OB/FVG/SR zone supplied by the
     # institutional bridge, confluence with EMA50, and protection of the last
     # confirmed pre-cross swing. EMA50 touch alone never grants an entry.
-    if macro_trend_aligned and macro_zone_low is not None and ema50 is not None:
+    if (macro_trend_aligned and macro_zone_low is not None and ema50 is not None
+            and zone_available_ts is not None):
         prior_start = max(0, cross_idx - 30)
         prior = closed.iloc[prior_start:cross_idx]
         protected_swing = None
@@ -969,11 +978,11 @@ def validate_ema915_vwap_pullback_entry_gate(
                         pivots.append(float(prior.high.iloc[p]))
             if pivots:
                 protected_swing = pivots[-1]
-            else:
-                protected_swing = float(prior.low.min()) if direction == "BUY" else float(prior.high.max())
         if protected_swing is not None:
             for idx in range(scan_start, len(closed) - 1):
                 candle = closed.iloc[idx]
+                if int(candle.timestamp) <= zone_available_ts:
+                    continue  # the zone must be knowable before the historical retest candle
                 candle_low, candle_high = float(candle.low), float(candle.high)
                 candle_close = float(candle.close)
                 ema50_i = float(ema50.iloc[idx])
