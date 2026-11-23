@@ -154,7 +154,7 @@ def validate_dual_ema_vwap_entry_gate(
     weights; it returns observable features for the downstream authority.
     """
     direction = str(side or "").upper()
-    lookback = max(1, min(3, int(lookback_candles)))
+    lookback = max(1, min(5, int(lookback_candles)))
     expected = "BULLISH" if direction == "BUY" else "BEARISH"
     result: Dict[str, Any] = {
         "ready": False, "side": direction, "reason": "invalid_side",
@@ -354,6 +354,283 @@ def validate_dual_ema_vwap_entry_gate(
     })
     return result
 
+
+
+
+def validate_adaptive_ema9_vwap_entry_gate(
+    df: pd.DataFrame, side: str, ema_fn: Callable,
+    timeframe_seconds: int = 900, now_ms: Optional[int] = None,
+    current_price: Optional[float] = None, lookback_candles: int = 5,
+    entry_zone_low: Optional[float] = None,
+    entry_zone_high: Optional[float] = None,
+    max_chase_atr: float = 1.5,
+) -> Dict[str, Any]:
+    """Evaluate a fresh EMA9/Session-VWAP cross and select an adaptive entry path.
+
+    The cross is the primary trigger; EMA50 is diagnostic only.  The decision
+    distinguishes a tradable immediate location from a pending micro-pullback
+    or structural retest.  It deliberately does not assign a win-probability
+    score or turn volume/EMA50 alignment into uncalibrated hard vetoes.
+
+    ``ready`` is True only when the selected location has been confirmed on a
+    closed candle and the current reference price has not chased the setup.
+    The caller remains responsible for spread, risk, sizing and execution.
+    """
+    direction = str(side or "").strip().upper()
+    base = validate_dual_ema_vwap_entry_gate(
+        df, direction, ema_fn, timeframe_seconds=timeframe_seconds,
+        now_ms=now_ms, lookback_candles=lookback_candles,
+    )
+    result: Dict[str, Any] = dict(base)
+    result.update({
+        "trigger": "EMA9_SESSION_VWAP_ADAPTIVE",
+        "ready": False,
+        "entry_mode": "WAIT",
+        "decision_state": "WAIT",
+        "entry_location": {},
+        "entry_zone_low": None,
+        "entry_zone_high": None,
+        "location_source": None,
+        "reason": str(base.get("reason") or "cross_not_authorized"),
+        "max_chase_atr": float(max_chase_atr),
+    })
+    if not base.get("ready"):
+        return result
+    if not validate_ohlcv(df):
+        result.update({"reason": "invalid_ohlcv", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+
+    tf = max(1, int(timeframe_seconds))
+    closed = closed_candles(df, tf, now_ms=now_ms)
+    if len(closed) < 15:
+        result.update({"reason": "insufficient_closed_candles", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+    try:
+        close = closed["close"].astype(float)
+        ema9 = pd.Series(ema_fn(close, 9), index=closed.index, dtype=float)
+        vwap_series = compute_session_vwap(closed, tf, now_ms=now_ms)
+        if vwap_series is None:
+            raise ValueError("session_vwap_unavailable")
+        vwap = pd.Series(vwap_series, index=closed.index, dtype=float)
+        tr = pd.concat([
+            (closed["high"] - closed["low"]).rename("hl"),
+            (closed["high"] - closed["close"].shift(1)).abs().rename("hc"),
+            (closed["low"] - closed["close"].shift(1)).abs().rename("lc"),
+        ], axis=1).max(axis=1)
+        atr = float(tr.rolling(14, min_periods=14).mean().iloc[-1])
+        e9 = float(ema9.iloc[-1])
+        vw = float(vwap.iloc[-1])
+    except Exception as exc:
+        result.update({
+            "reason": f"adaptive_context_unavailable:{type(exc).__name__}",
+            "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED",
+        })
+        return result
+    if not all(np.isfinite(x) for x in (atr, e9, vw)) or atr <= 0:
+        result.update({"reason": "adaptive_context_non_finite", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+
+    cross_ts = base.get("ema9_cross_timestamp")
+    try:
+        cross_ts = int(cross_ts)
+        cross_idx = int(closed.index[closed["timestamp"].astype("int64") == cross_ts][0])
+    except (TypeError, ValueError, IndexError):
+        result.update({"reason": "cross_candle_identity_unavailable", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+    last_idx = len(closed) - 1
+    cross_age_bars = last_idx - cross_idx
+    if cross_age_bars < 0 or cross_age_bars > max(1, int(lookback_candles)):
+        result.update({"reason": "cross_window_expired", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED", "cross_age_bars": cross_age_bars})
+        return result
+
+    live = float(current_price) if current_price is not None else float(close.iloc[-1])
+    if not np.isfinite(live) or live <= 0:
+        result.update({"reason": "invalid_current_price", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+    latest = closed.iloc[-1]
+    latest_open = float(latest["open"])
+    latest_close = float(latest["close"])
+    latest_high = float(latest["high"])
+    latest_low = float(latest["low"])
+    candle_directional = (latest_close > latest_open) if direction == "BUY" else (latest_close < latest_open)
+    close_aligned = (latest_close > max(e9, vw)) if direction == "BUY" else (latest_close < min(e9, vw))
+    live_vwap_aligned = (live > vw) if direction == "BUY" else (live < vw)
+    extension = ((live - e9) if direction == "BUY" else (e9 - live)) / atr
+    cross_close = float(closed["close"].iloc[cross_idx])
+    # Only favorable displacement is extension. A retracement back toward the
+    # cross/causal zone must not be mislabeled as chasing; zone distance below
+    # is the control that rejects an actually missed entry.
+    cross_extension = max(0.0, (live - cross_close) if direction == "BUY" else (cross_close - live)) / atr
+    result.update({
+        "ema9": e9, "vwap": vw, "atr": atr,
+        "latest_closed_timestamp": int(closed["timestamp"].iloc[-1]),
+        "cross_timestamp": cross_ts,
+        "cross_age_bars": cross_age_bars,
+        "current_price": live,
+        "ema9_extension_atr": extension,
+        "cross_close_extension_atr": cross_extension,
+        "live_vwap_aligned": bool(live_vwap_aligned),
+        "latest_candle_directional": bool(candle_directional),
+        "latest_close_aligned": bool(close_aligned),
+    })
+
+    # A precomputed institutional OB/S-R zone takes precedence.  If the
+    # upstream analyzer has no confirmed zone, use the EMA9/VWAP confluence
+    # band as the local execution area rather than pretending an OB exists.
+    try:
+        zlo = float(entry_zone_low) if entry_zone_low is not None else float("nan")
+        zhi = float(entry_zone_high) if entry_zone_high is not None else float("nan")
+    except (TypeError, ValueError, OverflowError):
+        zlo, zhi = float("nan"), float("nan")
+    if np.isfinite(zlo) and np.isfinite(zhi) and 0 < zlo < zhi:
+        zone_low, zone_high = zlo, zhi
+        location_source = "INSTITUTIONAL_ZONE"
+    else:
+        pad = 0.15 * atr
+        zone_low, zone_high = min(e9, vw) - pad, max(e9, vw) + pad
+        location_source = "EMA9_VWAP_CONFLUENCE"
+    result.update({
+        "entry_zone_low": float(zone_low), "entry_zone_high": float(zone_high),
+        "location_source": location_source,
+        "entry_location": {
+            "low": float(zone_low), "high": float(zone_high),
+            "reference": float((zone_low + zone_high) / 2.0),
+            "source": location_source,
+        },
+    })
+
+    # Price moving too far from the causal cross candle or confirmed zone is a
+    # missed opportunity, not a reason to chase.  The same check is repeated
+    # at the final live-ticker authorization point.
+    zone_distance = (max(zone_low - live, 0.0, live - zone_high) / atr)
+    result["entry_zone_distance_atr"] = float(zone_distance)
+    if abs(cross_extension) > max(0.1, float(max_chase_atr)) or zone_distance > max(0.1, float(max_chase_atr)):
+        result.update({"reason": "entry_window_missed_no_chase", "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED"})
+        return result
+    if not live_vwap_aligned:
+        result.update({"reason": "waiting_for_live_vwap_reclaim", "decision_state": "WAIT", "entry_mode": "WAITING_FOR_RECLAIM"})
+        return result
+
+    # Immediate entry is reserved for a directional closed candle while price
+    # is still at the actual execution area.  EMA50 opposition remains a note.
+    in_zone = zone_low <= live <= zone_high
+    core_distance = abs(live - ((e9 + vw) / 2.0)) / atr
+    if in_zone and core_distance <= 0.40 and candle_directional and close_aligned:
+        result.update({
+            "ready": True, "decision_state": "ENTRY_READY", "entry_mode": "DIRECT_ENTRY",
+            "reason": "fresh_cross_direct_location_confirmed",
+        })
+        return result
+
+    # Detect a real close beyond the prior 10-candle range on the cross bar.
+    # That level becomes the causal retest reference; a wick alone is not BOS.
+    structural_level = None
+    prior_start = max(0, cross_idx - 10)
+    prior = closed.iloc[prior_start:cross_idx]
+    if len(prior) >= 3:
+        cross_candle = closed.iloc[cross_idx]
+        if direction == "BUY":
+            prior_level = float(prior["high"].max())
+            if float(cross_candle["close"]) > prior_level:
+                structural_level = prior_level
+        else:
+            prior_level = float(prior["low"].min())
+            if float(cross_candle["close"]) < prior_level:
+                structural_level = prior_level
+
+    if structural_level is not None:
+        result["structure_break"] = True
+        result["retest_level"] = float(structural_level)
+        retest = False
+        retest_idx = None
+        last_padding = 0.15 * atr
+        # Scanner rotations can miss the exact retest candle. Search every
+        # closed candle after the cross, retaining only a reclaim that has not
+        # been invalidated by a later close through the level.
+        for idx in range(cross_idx + 1, last_idx + 1):
+            candle_i = closed.iloc[idx]
+            o_i, h_i, l_i, c_i = (float(candle_i[k]) for k in ("open", "high", "low", "close"))
+            directional_i = c_i > o_i if direction == "BUY" else c_i < o_i
+            touched_i = (l_i <= structural_level + last_padding) if direction == "BUY" else (h_i >= structural_level - last_padding)
+            reclaimed_i = c_i >= structural_level if direction == "BUY" else c_i <= structural_level
+            invalidated_i = c_i < structural_level - 0.25 * atr if direction == "BUY" else c_i > structural_level + 0.25 * atr
+            if invalidated_i:
+                retest = False
+                retest_idx = None
+            elif touched_i and reclaimed_i and directional_i:
+                retest = True
+                retest_idx = idx
+        retest_distance = abs(live - structural_level) / atr
+        current_level_hold = (live >= structural_level) if direction == "BUY" else (live <= structural_level)
+        result["retest_confirmed"] = bool(retest and current_level_hold)
+        result["retest_candle_timestamp"] = int(closed["timestamp"].iloc[retest_idx]) if retest_idx is not None else None
+        result["retest_distance_atr"] = float(retest_distance)
+        if retest and current_level_hold and retest_distance <= 0.50:
+            result.update({
+                "ready": True, "decision_state": "ENTRY_READY", "entry_mode": "RETEST_ENTRY",
+                "reason": "breakout_retest_reclaim_confirmed",
+                "entry_zone_low": float(structural_level - 0.15 * atr),
+                "entry_zone_high": float(structural_level + 0.15 * atr),
+                "entry_location": {
+                    "low": float(structural_level - 0.15 * atr),
+                    "high": float(structural_level + 0.15 * atr),
+                    "reference": float(structural_level), "source": "STRUCTURE_RETEST",
+                },
+            })
+            return result
+        result.update({"reason": "waiting_for_structural_retest", "decision_state": "WAIT", "entry_mode": "RETEST_ENTRY"})
+        return result
+
+    # No structural breakout: prefer a controlled micro-pullback into the
+    # causal zone.  A touch plus directional close is required; merely coming
+    # near a moving average does not authorize an order.
+    pullback_touch = False
+    pullback_reclaimed = False
+    pullback_idx = None
+    touch_pad = 0.15 * atr
+    for idx in range(cross_idx + 1, last_idx + 1):
+        candle_i = closed.iloc[idx]
+        o_i, h_i, l_i, c_i = (float(candle_i[k]) for k in ("open", "high", "low", "close"))
+        vwap_i = float(vwap.iloc[idx])
+        directional_i = c_i > o_i if direction == "BUY" else c_i < o_i
+        if direction == "BUY":
+            touched_i = l_i <= zone_high + touch_pad and l_i >= zone_low - 0.25 * atr
+            reclaimed_i = c_i > zone_high and c_i > vwap_i and directional_i
+            invalidated_i = c_i < zone_low - 0.25 * atr
+        else:
+            touched_i = h_i >= zone_low - touch_pad and h_i <= zone_high + 0.25 * atr
+            reclaimed_i = c_i < zone_low and c_i < vwap_i and directional_i
+            invalidated_i = c_i > zone_high + 0.25 * atr
+        if invalidated_i:
+            pullback_touch = False
+            pullback_reclaimed = False
+            pullback_idx = None
+        elif touched_i and reclaimed_i:
+            pullback_touch = True
+            pullback_reclaimed = True
+            pullback_idx = idx
+    pullback_distance = abs(live - ((zone_low + zone_high) / 2.0)) / atr
+    current_zone_hold = (live >= zone_low) if direction == "BUY" else (live <= zone_high)
+    if pullback_idx is not None:
+        result["micro_pullback_candle_timestamp"] = int(closed["timestamp"].iloc[pullback_idx])
+    result.update({
+        "micro_pullback_touched": bool(pullback_touch),
+        "micro_pullback_reclaimed": bool(pullback_reclaimed),
+        "micro_pullback_current_zone_hold": bool(current_zone_hold),
+        "micro_pullback_distance_atr": float(pullback_distance),
+    })
+    if pullback_touch and pullback_reclaimed and current_zone_hold and pullback_distance <= 0.75:
+        result.update({
+            "ready": True, "decision_state": "ENTRY_READY", "entry_mode": "MICRO_PULLBACK",
+            "reason": "micro_pullback_touch_and_reclaim_confirmed",
+        })
+        return result
+
+    result.update({
+        "reason": "waiting_for_micro_pullback",
+        "decision_state": "WAIT", "entry_mode": "MICRO_PULLBACK",
+    })
+    return result
 
 
 def validate_ema915_vwap_pullback_entry_gate(
