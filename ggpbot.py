@@ -6966,9 +6966,10 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
                     gate_result.get("ready") is True
                     and gate_result.get("gate_kind") == "EMA915_PULLBACK"
                     and gate_result.get("authorization_state") in {
-                        "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_MACRO_PULLBACK_VALID"
+                        "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_RETEST_VALID",
+                        "EMA915_VWAP_MACRO_PULLBACK_VALID"
                     }
-                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "MACRO_PULLBACK"}
+                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "RETEST", "MACRO_PULLBACK"}
                     and any(ev == "ema9_ema15_cross_confirmed" for ev in evidence)
                     and any(ev.startswith("causal_zone:") for ev in evidence)
                     and any(ev.startswith("structure_confirmation:") or ev.startswith("liquidity_confirmation:") for ev in evidence)
@@ -9863,7 +9864,7 @@ function updateUI(d) {{
             let icon = item.cross ? "⚡" : (item.state === "NEAR_CROSS" || item.state === "CONVERGING" ? "🟡" : item.direction === "BUY" ? "📈" : item.direction === "SELL" ? "📉" : "⚪");
             let st = item.ema915_vwap_strategy || {{}};
             let stage = st.stage || "WAITING_FOR_SCAN";
-            let stageColor = ["ENTRY_READY", "MICRO_PULLBACK_READY", "MACRO_PULLBACK_READY"].includes(stage) ? "#2ecc71" :
+            let stageColor = ["ENTRY_READY", "MICRO_PULLBACK_READY", "RETEST_READY", "MACRO_PULLBACK_READY"].includes(stage) ? "#2ecc71" :
                 (["ENTRY_WINDOW_MISSED", "INVALIDATED", "CHOP_FILTER", "STALE_DATA"].includes(stage) ? "#e74c3c" :
                 (["NO_FRESH_CROSS", "CROSS_EXPIRED", "CROSS_DIRECTION_MISMATCH"].includes(stage) ? "#95a5a6" : "#f1c40f"));
             let active = st.active_side || "NONE";
@@ -11639,13 +11640,18 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                             "excessive_vwap_whipsaw": "CHOP_FILTER",
                         }
                         if _check.get("ready") is True:
-                            _check["stage"] = "MACRO_PULLBACK_READY" if _check.get("entry_mode") == "MACRO_PULLBACK" else "MICRO_PULLBACK_READY"
+                            _check["stage"] = (
+                                "MACRO_PULLBACK_READY" if _check.get("entry_mode") == "MACRO_PULLBACK"
+                                else "RETEST_READY" if _check.get("entry_mode") == "RETEST"
+                                else "MICRO_PULLBACK_READY"
+                            )
                         else:
                             _check["stage"] = _stage_map.get(_reason, "WAITING" if _check.get("cross_fresh") else "NO_FRESH_CROSS")
                         _check["setup_progress_pct"] = {
                             "MICRO_PULLBACK_READY": 100, "MACRO_PULLBACK_READY": 100,
                             "WAITING_FOR_CONTINUATION_BREAK": 80, "WAITING_FOR_REJECTION": 60,
                             "WAITING_FOR_PULLBACK": 35, "WAITING_FOR_RECLAIM": 25,
+                            "RETEST_READY": 100,
                             "ENTRY_WINDOW_MISSED": 0, "INVALIDATED": 0,
                             "CROSS_EXPIRED": 0, "CROSS_DIRECTION_MISMATCH": 0,
                             "NO_FRESH_CROSS": 0, "STALE_DATA": 0, "CHOP_FILTER": 0,
