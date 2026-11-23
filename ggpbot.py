@@ -6967,9 +6967,11 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
                     and gate_result.get("gate_kind") == "EMA915_PULLBACK"
                     and gate_result.get("authorization_state") in {
                         "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_RETEST_VALID",
-                        "EMA915_VWAP_MACRO_PULLBACK_VALID"
+                        "EMA915_VWAP_MACRO_PULLBACK_VALID", "EMA915_VWAP_IMPULSE_VALID"
                     }
-                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "RETEST", "MACRO_PULLBACK"}
+                    and gate_result.get("entry_mode") in {
+                        "MICRO_PULLBACK", "RETEST", "MACRO_PULLBACK", "IMPULSE_ENTRY"
+                    }
                     and any(ev == "ema9_ema15_cross_confirmed" for ev in evidence)
                     and any(ev.startswith("causal_zone:") for ev in evidence)
                     and any(ev.startswith("structure_confirmation:") or ev.startswith("liquidity_confirmation:") for ev in evidence)

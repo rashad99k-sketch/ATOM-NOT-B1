@@ -34,8 +34,12 @@ def _frame(side="BUY", count=80):
 def _ema_factory(side="BUY"):
     def ema(values, period):
         if period == 9:
-            out = np.full(len(values), 99.8 if side == "BUY" else 100.2, dtype=float)
-            out[-4:] = 100.2 if side == "BUY" else 100.0
+            if side == "BUY":
+                out = np.full(len(values), 99.8, dtype=float)
+                out[-4:] = 100.2
+            else:
+                out = np.full(len(values), 100.2, dtype=float)
+                out[-4:] = 100.0
         elif period == 15:
             out = np.full(len(values), 100.0 if side == "BUY" else 100.1, dtype=float)
         else:

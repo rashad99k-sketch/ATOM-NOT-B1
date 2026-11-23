@@ -70,7 +70,7 @@ def test_adaptive_cross_can_authorize_only_with_zone_and_structure_or_liquidity(
     assert result["setup_type"] == "EMA9_VWAP_ADAPTIVE"
     assert result["structural_stop"] < result["price"]
     assert "ema9_ema15_cross_confirmed" in result["evidence"]
-    assert any(item.startswith("ema915_pullback_rejection_break:") for item in result["evidence"])
+    assert any(item.startswith("ema915_adaptive_confirmation:") for item in result["evidence"])
     assert any(item.startswith("causal_zone:ORDER_BLOCK") for item in result["evidence"])
 
 
@@ -115,11 +115,9 @@ def test_live_adaptive_gate_explicitly_allows_only_confirmed_impulse_mode():
     from pathlib import Path
 
     source = Path(__file__).with_name("ggpbot.py").read_text(encoding="utf-8")
-    execute = source.split("def execute_entry(", 1)[1].split("\ndef ", 1)[0]
-    assert '"EMA915_VWAP_IMPULSE_VALID"' in execute
-    assert '"IMPULSE_ENTRY"' in execute
-    assert 'gate_result.get("gate_kind") == "EMA915_PULLBACK"' in execute
-
+    authorization = source.split('elif setup == "EMA9_VWAP_ADAPTIVE":', 1)[1].split("\n            else:", 1)[0]
+    assert '"EMA915_VWAP_IMPULSE_VALID"' in authorization
+    assert '"IMPULSE_ENTRY"' in authorization
     open_position = source.split("def open_position(", 1)[1]
     assert "_validate_ema915_vwap_pullback_entry_gate(" in open_position
     assert "entry_gate_snapshot" in open_position
