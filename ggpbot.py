@@ -10049,7 +10049,9 @@ function updateUI(d) {{
     }}
     document.getElementById("no-entry-feed").innerHTML = noEntryHtml || "No recent skips";
     const flow = d.institutional_flow || {{}};
-    const flowUsable = flow.status === "VALID" || flow.status === "STALE";
+    const flowAgeMs = flow.last_valid_update_ms ? Date.now() - Number(flow.last_valid_update_ms) : null;
+    const flowDisplayStatus = flow.status === "VALID" && flowAgeMs > 90000 ? "STALE" : (flow.status || "DATA_UNAVAILABLE");
+    const flowUsable = flowDisplayStatus === "VALID" || flowDisplayStatus === "STALE";
     const flowNumber = key => flowUsable && flow[key] != null && Number.isFinite(Number(flow[key]))
         ? Number(flow[key]).toFixed(1) : "—";
     document.getElementById("flow-banker").innerText = flowNumber("banker_pressure");
@@ -10069,7 +10071,7 @@ function updateUI(d) {{
         ? (flow.smart_money_dominant ? "✅ Yes" : "❌ No") : "—";
     const flowUpdated = flow.last_valid_update_ms ? new Date(flow.last_valid_update_ms).toLocaleString() : "—";
     document.getElementById("flow-meta").innerText =
-        (flow.status || "DATA_UNAVAILABLE") + " · " + (flow.source_symbol || "source unavailable")
+        flowDisplayStatus + " · " + (flow.source_symbol || "source unavailable")
         + " " + (flow.source_timeframe || "") + " · " + (flow.source || "no valid source")
         + " · Last valid: " + flowUpdated + " · " + (flow.reason || "—");
 }}
