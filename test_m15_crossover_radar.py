@@ -87,6 +87,56 @@ def test_approaching_cross_has_distinct_pre_cross_state():
     assert result["entry_authorization"] is False
 
 
+def test_recent_closed_cross_remains_visible_for_eight_closed_bars():
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0, 111.0, 112.0, 113.0]
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+
+    result = evaluate_m15_radar("BTC/USDT", frame, now_ms=NOW)
+
+    assert result["crossover_status"] == "CROSS_CONFIRMED"
+    assert result["direction"] == "BUY"
+    assert result["cross_age_bars"] == 3
+    assert result["signal_timestamp_ms"] == int(frame["timestamp"].iloc[-4])
+    assert result["chart"]["cross_marker"]["timestamp"] == int(frame["timestamp"].iloc[-4])
+    assert result["entry_authorization"] is False
+
+
+def test_recent_closed_cross_at_exact_eight_bar_limit_is_still_visible():
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0] + [111.0] * 8
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+
+    result = evaluate_m15_radar("ETH/USDT", frame, now_ms=NOW)
+
+    assert result["crossover_status"] == "CROSS_CONFIRMED"
+    assert result["cross_age_bars"] == 8
+
+
+def test_recent_closed_cross_older_than_eight_bars_is_not_fresh():
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0] + [111.0] * 9
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+
+    result = evaluate_m15_radar("ETH/USDT", frame, now_ms=NOW)
+
+    assert result["crossover_status"] != "CROSS_CONFIRMED"
+    assert result["entry_authorization"] is False
+
+
+def test_watchlist_shared_frame_publishes_recent_cross_without_extra_fetch():
+    from m15_watchlist_integration import process_m15_watchlist_frame
+
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0, 111.0, 112.0, 113.0]
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+    memory = {"watchlist": {}, "m15_crossover_radar": []}
+
+    result = process_m15_watchlist_frame("BTC/USDT", frame, memory, now_ms=NOW)
+
+    assert result["crossover_status"] == "CROSS_CONFIRMED"
+    assert result["cross_age_bars"] == 3
+    assert memory["m15_crossover_radar"][0]["symbol"] == "BTC/USDT"
+    assert memory["m15_crossover_radar_meta"]["source"] == "SCANNER_2_SHARED_CLOSED_FRAME"
+    assert memory["m15_crossover_radar_meta"]["entry_authorization"] is False
+
+
 def test_stale_m15_snapshot_is_rejected():
     old_now = NOW - 5_000_000
     frame = frame_from_closes([100.0] * 60, old_now - 60 * 900_000)
@@ -139,7 +189,35 @@ def test_shared_scanner_cache_reuses_raw_snapshot_and_returns_closed_bars_only(m
 
 
 
-def test_standalone_30_second_radar_is_disabled_without_exchange_fetch(monkeypatch):
+def test_stale_duplicate_closed_frame_is_removed_from_radar():
+    from m15_watchlist_integration import process_m15_watchlist_frame
+
+    frame = frame_from_closes(
+        [100.0] * 60,
+        NOW - 60 * 900_000 - 45 * 60_000,
+    )
+    candle_ts = int(frame["timestamp"].iloc[-1])
+    prior = {
+        "symbol": "BTC/USDT", "lifecycle_active": False,
+        "crossover_status": "CROSS_CONFIRMED", "direction": "BUY",
+        "last_update_ms": NOW - 45 * 60_000,
+    }
+    memory = {
+        "watchlist": {"BTC/USDT": {"symbol": "BTC/USDT", "m15_setup": {"stage": "WAITING"}}},
+        "_m15_lifecycle_last_candle": {"BTC/USDT": candle_ts},
+        "_m15_lifecycle_rows": {"BTC/USDT": prior},
+        "m15_crossover_radar": [prior],
+    }
+
+    result = process_m15_watchlist_frame("BTC/USDT", frame, memory, now_ms=NOW)
+
+    assert result["crossover_status"] == "EXPIRED"
+    assert memory["m15_crossover_radar"] == []
+    assert memory["m15_crossover_radar_meta"]["state"] == "DATA_UNAVAILABLE"
+    assert memory["m15_crossover_radar_meta"]["last_data_error"] == "STALE_CLOSED_CANDLE_DATA"
+
+
+def test_legacy_radar_hook_does_not_launch_duplicate_exchange_scan(monkeypatch):
     import inspect
     import ggpbot
 
@@ -151,6 +229,37 @@ def test_standalone_30_second_radar_is_disabled_without_exchange_fetch(monkeypat
     assert not hasattr(ggpbot, "M15_RADAR_BATCH_SIZE")
     main_loop_source = inspect.getsource(ggpbot._original_main_loop_sniper)
     assert "run_m15_crossover_radar" not in main_loop_source
+
+
+def test_institutional_flow_unavailable_never_publishes_synthetic_defaults(monkeypatch):
+    import ggpbot
+
+    monkeypatch.setattr(ggpbot, "_discovery_paused", lambda: False)
+    monkeypatch.setattr(ggpbot, "get_ohlcv_safe", lambda *args, **kwargs: None)
+    ggpbot.DASHBOARD_STATE["institutional_flow"] = {}
+
+    assert ggpbot.update_institutional_flow_scanner() is False
+    flow = ggpbot.DASHBOARD_STATE["institutional_flow"]
+    assert flow["status"] == "DATA_UNAVAILABLE"
+    assert flow["banker_pressure"] is None
+    assert flow["institutional_bias"] is None
+
+
+def test_institutional_flow_failure_preserves_last_valid_snapshot_as_stale(monkeypatch):
+    import ggpbot
+
+    monkeypatch.setattr(ggpbot, "_discovery_paused", lambda: False)
+    monkeypatch.setattr(ggpbot, "get_ohlcv_safe", lambda *args, **kwargs: None)
+    ggpbot.DASHBOARD_STATE["institutional_flow"] = {
+        "status": "VALID", "banker_pressure": 71.2,
+        "last_valid_update_ms": NOW - 1000,
+    }
+
+    assert ggpbot.update_institutional_flow_scanner() is False
+    flow = ggpbot.DASHBOARD_STATE["institutional_flow"]
+    assert flow["status"] == "STALE"
+    assert flow["banker_pressure"] == 71.2
+    assert flow["last_valid_update_ms"] == NOW - 1000
 
 
 def test_legacy_two_stage_scanner_cadence_is_preserved():

@@ -15,6 +15,12 @@ try:
 except (TypeError, ValueError):
     TRIPLE_CROSS_WINDOW_CANDLES = 4
 
+# Match the strategy's closed-candle freshness window; discovery/display only.
+try:
+    M15_CROSS_LOOKBACK_BARS = max(1, min(8, int(os.getenv("M15_CROSS_LOOKBACK_BARS", "8"))))
+except (TypeError, ValueError):
+    M15_CROSS_LOOKBACK_BARS = 8
+
 
 def _finite(value: Any) -> Optional[float]:
     try:
@@ -30,6 +36,7 @@ def _empty(symbol: str, reason: str, now_ms: int) -> Dict[str, Any]:
         "current_price": None, "ema9": None, "ema15": None, "session_vwap": None,
         "ema_distance": None, "atr": None, "volume_ratio": None,
         "crossover_status": "DATA_UNAVAILABLE", "opportunity_state": "WAITING",
+        "cross_age_bars": None, "cross_lookback_bars": M15_CROSS_LOOKBACK_BARS,
         "entry_readiness": "NOT_AUTHORIZED_BY_RADAR", "rejection_reason": reason,
         "last_update_ms": now_ms, "signal_timestamp_ms": None, "chart": None,
         "evidence": {}, "entry_authorization": False,
@@ -107,14 +114,33 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     dx = 100.0 * (di_plus_s - di_minus_s).abs() / (di_plus_s + di_minus_s).replace(0, np.nan)
     adx_s = dx.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
     adx_value, di_plus_value, di_minus_value = map(_finite, (adx_s.iloc[-1], di_plus_s.iloc[-1], di_minus_s.iloc[-1]))
-    gap = float(ema9.iloc[-1] - ema15.iloc[-1])
-    gap_prev = float(ema9.iloc[-2] - ema15.iloc[-2])
-    gap_before = float(ema9.iloc[-3] - ema15.iloc[-3])
+    gap_series = ema9 - ema15
+    gap = float(gap_series.iloc[-1])
+    gap_prev = float(gap_series.iloc[-2])
+    gap_before = float(gap_series.iloc[-3])
     gap_atr = abs(gap) / atr
     contracted = abs(gap) < abs(gap_prev) and abs(gap_prev) <= abs(gap_before) + 0.02 * atr
     confirmed_side = "BUY" if gap > 0 and gap_prev <= 0 else "SELL" if gap < 0 and gap_prev >= 0 else None
-    signal_timestamp = int(closed["timestamp"].iloc[-1])
-    closed_age = max(0, now_ms - (signal_timestamp + 900_000))
+
+    # Keep a recently closed cross visible for the same 8-bar freshness window
+    # used by the independent entry diagnostics; never authorize entry here.
+    recent_cross_idx = None
+    recent_cross_side = None
+    recent_start = max(1, len(closed) - 1 - M15_CROSS_LOOKBACK_BARS)
+    for cross_idx in range(len(closed) - 1, recent_start - 1, -1):
+        previous_gap = float(gap_series.iloc[cross_idx - 1])
+        current_gap = float(gap_series.iloc[cross_idx])
+        if previous_gap <= 0 < current_gap:
+            recent_cross_idx, recent_cross_side = cross_idx, "BUY"
+            break
+        if previous_gap >= 0 > current_gap:
+            recent_cross_idx, recent_cross_side = cross_idx, "SELL"
+            break
+    cross_age_bars = (len(closed) - 1 - recent_cross_idx) if recent_cross_idx is not None else None
+    signal_timestamp = int(closed["timestamp"].iloc[recent_cross_idx]) if recent_cross_idx is not None else None
+    signal_price = _finite(close.iloc[recent_cross_idx]) if recent_cross_idx is not None else None
+    latest_closed_timestamp = int(closed["timestamp"].iloc[-1])
+    closed_age = max(0, now_ms - (latest_closed_timestamp + 900_000))
     if closed_age > int(max_closed_age_ms):
         expired = _empty(symbol, "STALE_CLOSED_CANDLE_DATA", now_ms)
         expired.update({"crossover_status": "EXPIRED", "opportunity_state": "EXPIRED"})
@@ -124,7 +150,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     latest_price = _finite(last_raw["close"])
     raw_is_forming = int(last_raw["timestamp"]) + 900_000 > now_ms
     intrabar_side = None
-    if raw_is_forming and int(last_raw["timestamp"]) > signal_timestamp:
+    if raw_is_forming and int(last_raw["timestamp"]) > latest_closed_timestamp:
         live_close = pd.concat([close, pd.Series([float(last_raw["close"])])], ignore_index=True)
         live_ema9 = live_close.ewm(span=9, adjust=False).mean()
         live_ema15 = live_close.ewm(span=15, adjust=False).mean()
@@ -134,14 +160,14 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         elif gap >= 0 > live_gap:
             intrabar_side = "SELL"
 
-    direction = confirmed_side or intrabar_side
+    direction = recent_cross_side or intrabar_side
     if direction is None and contracted and gap_atr <= 0.25:
         direction = "BUY" if gap < 0 and float(ema9.iloc[-1] - ema9.iloc[-2]) > 0 else \
                     "SELL" if gap > 0 and float(ema9.iloc[-1] - ema9.iloc[-2]) < 0 else "UNKNOWN"
-    if confirmed_side:
+    if recent_cross_side:
         status = "CROSS_CONFIRMED"
         state = "WAITING_FOR_PULLBACK"
-        reason = "CLOSED_M15_EMA9_EMA15_CROSS"
+        reason = "RECENT_CLOSED_M15_EMA9_EMA15_CROSS"
     elif intrabar_side:
         status = "CROSS_DETECTED"
         state = "WAITING_FOR_CANDLE_CLOSE"
@@ -167,7 +193,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     triple = detect_triple_confluence(
         closed["timestamp"].tolist(), close.tolist(), ema9.tolist(), ema15.tolist(),
         vwap_series.tolist() if vwap_series is not None else [np.nan] * len(closed),
-        window_candles=TRIPLE_CROSS_WINDOW_CANDLES, direction=confirmed_side, atr=atr, adx=adx_value,
+        window_candles=TRIPLE_CROSS_WINDOW_CANDLES, direction=recent_cross_side, atr=atr, adx=adx_value,
         di_plus=di_plus_value, di_minus=di_minus_value,
     ) if vwap_series is not None else {"status": "INVALID", "direction": "UNKNOWN",
         "event_id": None, "window_candles": TRIPLE_CROSS_WINDOW_CANDLES, "reasons": ["session_vwap_unavailable"],
@@ -181,9 +207,10 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         elif direction == "SELL" and price >= e9:
             state, reason = "INVALIDATED", "CLOSED_PRICE_RECLAIMED_EMA9_AFTER_BEARISH_CROSS"
         else:
-            after_cross = closed.iloc[-5:-1]
-            touched = bool(((after_cross["low"] <= ema9.iloc[-5:-1] + 0.35 * atr) &
-                            (after_cross["high"] >= ema9.iloc[-5:-1] - 0.35 * atr)).any()) if len(after_cross) else False
+            after_cross = closed.iloc[recent_cross_idx + 1:] if recent_cross_idx is not None else closed.iloc[0:0]
+            after_cross_ema9 = ema9.iloc[recent_cross_idx + 1:] if recent_cross_idx is not None else ema9.iloc[0:0]
+            touched = bool(((after_cross["low"] <= after_cross_ema9 + 0.35 * atr) &
+                            (after_cross["high"] >= after_cross_ema9 - 0.35 * atr)).any()) if len(after_cross) else False
             if touched:
                 state = "WAITING_FOR_CONFIRMATION"
                 reason = "PULLBACK_NEAR_EMA9; ENTRY_GATE_CONFIRMATION_REQUIRED"
@@ -199,7 +226,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         "ema15": [float(x) for x in ema15.iloc[chart_start:]],
         "session_vwap": [(_finite(x)) for x in (vwap_series.iloc[chart_start:] if vwap_series is not None else [None] * (len(closed) - chart_start))],
         "volume": [float(x) for x in closed["volume"].iloc[chart_start:]],
-        "cross_marker": {"timestamp": signal_timestamp, "direction": confirmed_side, "status": "CONFIRMED"} if confirmed_side else None,
+        "cross_marker": {"timestamp": signal_timestamp, "direction": recent_cross_side,
+                         "price": signal_price, "status": "CONFIRMED"} if recent_cross_side else None,
         "intrabar_marker": {"timestamp": int(last_raw["timestamp"]), "direction": intrabar_side, "status": "PROVISIONAL"} if intrabar_side else None,
     }
     return {
@@ -211,16 +239,17 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         "pullback_zone": pullback_zone, "triple_confluence": triple,
         "volume_ratio": round(volume_ratio, 5) if volume_ratio is not None else None,
         "crossover_status": status, "opportunity_state": state,
+        "cross_age_bars": cross_age_bars, "cross_lookback_bars": M15_CROSS_LOOKBACK_BARS,
         "entry_readiness": "NOT_AUTHORIZED_BY_RADAR",
         "rejection_reason": reason, "last_update_ms": now_ms,
-        "signal_timestamp_ms": signal_timestamp if confirmed_side else int(last_raw["timestamp"]) if intrabar_side else None,
+        "signal_timestamp_ms": signal_timestamp if recent_cross_side else int(last_raw["timestamp"]) if intrabar_side else None,
         "closed_candle_age_ms": closed_age,
         "liquidity_status": "ANALYZE_WITH_EXISTING_INSTITUTIONAL_WATCHLIST",
         "market_regime": "UNCLASSIFIED_BY_RADAR",
         "setup_quality": None, "opportunity_priority": None,
         "evidence": {
-            "closed_m15_confirmed": bool(confirmed_side),
-            "intrabar_only": bool(intrabar_side and not confirmed_side),
+            "closed_m15_confirmed": bool(recent_cross_side),
+            "intrabar_only": bool(intrabar_side and not recent_cross_side),
             "ema_gap_contracting": bool(contracted),
             "body_to_range": round(body_ratio, 5) if body_ratio is not None else None,
             "close_position": round(close_position, 5) if close_position is not None else None,
