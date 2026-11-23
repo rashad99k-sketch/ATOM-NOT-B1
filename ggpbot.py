@@ -6786,7 +6786,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             )
             return False
     log_execution(
-        f"[EMA9_VWAP_ADAPTIVE_GATE] PASSED {symbol} {side} "
+        f"[EMA915_VWAP_ENTRY_GATE] PASSED {symbol} {side} "
         f"mode={gate_result.get('entry_mode')} cross_ts={gate_result.get('cross_timestamp')} "
         f"event={gate_result.get('signal_candle_id')} zone={gate_result.get('entry_zone_low')}-{gate_result.get('entry_zone_high')} "
         f"EMA9={gate_result.get('ema9')} VWAP={gate_result.get('vwap')} "

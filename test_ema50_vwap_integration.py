@@ -98,6 +98,15 @@ def test_watchlist_candidate_priority_uses_directional_cross_and_ema_vwap_entry_
     assert "AUTHORITY.decide" in source  # retained for diagnostics/ranking, not entry veto
     assert "validate_ema915_vwap_location_first_entry_gate" in source
     assert "execute_entry remain the sole entry authorization path" in source
+    execute_start = source.index("def execute_entry(")
+    execute_end = source.index("\ndef dynamic_spread_tolerance(", execute_start)
+    execute = source[execute_start:execute_end]
+    assert "EMA915_VWAP_LOCATION_FIRST" in execute
+    assert "institutional analysis is location-only" in execute
+    assert "causal_zone:" not in execute
+    assert "No liquidity sweep" not in execute
+    assert "Legacy path ADX" not in execute
+
 
 
 def test_cross_timestamp_fields_are_provided_to_profit_and_dashboard_context():

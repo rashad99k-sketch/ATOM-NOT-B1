@@ -1979,9 +1979,10 @@ def validate_ema915_vwap_location_first_entry_gate(
 ) -> Dict[str, Any]:
     """Primary EMA9/EMA15 + Session VWAP entry gate; institutional data is location-only.
 
-    Requires a fresh closed-bar EMA9/EMA15 cross, a later pullback touch, a
-    separate rejection candle, and a still-later close through the rejection
-    candle. No institutional sweep/MSS/BOS/OB is required to create the setup.
+    Requires a fresh closed-bar EMA9/EMA15 cross, VWAP alignment, a later
+    micro retest to the EMA9/EMA15/VWAP band or an optional deeper EMA50 macro
+    pullback, a separate rejection candle, and a still-later continuation close.
+    No institutional sweep/MSS/BOS/OB is required to create the setup.
     Confirmed opposing supply/resistance (BUY) or demand/support (SELL) only
     blocks when it materially consumes the available path to TP1.
     """
