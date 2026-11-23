@@ -6271,6 +6271,12 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
                         "entry_client_order_id": result.client_order_id,
                         "entry_exchange_order_id": result.exchange_order_id,
                         "entry_unfilled_qty": safe_float(result.remaining_qty, 0.0),
+                        "entry_remainder_cancel_verified": "remainder_cancel=VERIFIED" in str(result.reason or ""),
+                        "entry_remainder_cancel_state": (
+                            "VERIFIED" if "remainder_cancel=VERIFIED" in str(result.reason or "")
+                            else "UNVERIFIED" if "remainder_cancel=UNVERIFIED" in str(result.reason or "")
+                            else "NOT_REPORTED"
+                        ),
                         "execution_unresolved": True, "recovery_hold": True,
                         "recovery_reason": "PARTIAL_OR_UNCERTAIN_FILL_REQUIRES_EXCHANGE_RECONCILIATION",
                     })
@@ -6677,9 +6683,9 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         return False
     trade_id = uuid.uuid4().hex
     institutional_entry_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT") or {}
-    # EMA9/EMA15 cross starts this adaptive lane; Session VWAP is directional
-    # context. The gate requires a micro pullback, causal-zone retest, or EMA50
-    # macro pullback, followed by a separate rejection and quality break.
+    # One entry authority across radar, watchlist, authorization and exchange:
+    # closed EMA9/EMA15 cross -> Session VWAP direction -> pullback touch ->
+    # separate rejection -> later closed continuation break -> location/no-chase checks.
     gate_setup_type = str(institutional_entry_ctx.get("setup_type") or "").strip().upper()
     gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
     gate_evidence = list(institutional_entry_ctx.get("evidence") or [])
@@ -6728,7 +6734,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
     globals()["_LAST_EXECUTION_GATE_RESULT"] = dict(gate_result)
     if not gate_result.get("ready"):
         log_execution(
-            f"[EMA9_VWAP_ADAPTIVE_GATE] BLOCKED {symbol} {side} decision={gate_result.get('entry_mode')} "
+            f"[EMA915_VWAP_ENTRY_GATE] BLOCKED {symbol} {side} decision={gate_result.get('entry_mode')} "
             f"reason={gate_result.get('reason')} EMA9={gate_result.get('ema9')} "
             f"VWAP={gate_result.get('vwap')} EMA50={gate_result.get('ema50')} "
             f"EMA50_alignment={gate_result.get('ema50_alignment')} "
@@ -7116,6 +7122,13 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             "entry_zone_low": safe_float(institutional_entry_ctx.get("entry_zone_low"), 0.0),
             "entry_zone_high": safe_float(institutional_entry_ctx.get("entry_zone_high"), 0.0),
             "support_resistance": dict(institutional_entry_ctx.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
+            "entry_gate_snapshot": dict(gate_result),
+            "entry_gate_kind": gate_result.get("gate_kind", "EMA915_VWAP_LOCATION_FIRST"),
+            "entry_gate_timeframe": gate_tf,
+            "entry_gate_setup_mode": gate_setup_mode,
+            "entry_gate_evidence": list(gate_evidence),
+            "entry_gate_event_id": gate_event_id,
+            "entry_gate_origin_timestamp": gate_origin_timestamp,
             "entry_location_context": dict(institutional_entry_ctx.get("location_context") or {}),
             "entry_behavior_confidence": safe_float(institutional_entry_ctx.get("entry_behavior_confidence"), 0.0),
             "entry_behavior_reasons": list(institutional_entry_ctx.get("entry_behavior_reasons") or []),
@@ -11699,7 +11712,7 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                             "WAITING_FOR_CONTINUATION_BREAK": 80, "WAITING_FOR_REJECTION": 60,
                             "WAITING_FOR_PULLBACK": 35, "WAITING_FOR_RECLAIM": 25,
                             "RETEST_READY": 100,
-                            "ENTRY_WINDOW_MISSED": 0, "INVALIDATED": 0,
+                            "ENTRY_WINDOW_MISSED": 0, "LOCATION_BLOCKED": 0, "INVALIDATED": 0,
                             "CROSS_EXPIRED": 0, "CROSS_DIRECTION_MISMATCH": 0,
                             "NO_FRESH_CROSS": 0, "STALE_DATA": 0, "CHOP_FILTER": 0,
                         }.get(_check["stage"], 15)
