@@ -2105,7 +2105,7 @@ def validate_ema915_vwap_location_first_entry_gate(
         result.update({"reason": "waiting_for_pullback_touch",
                        "decision_state": "WAITING_FOR_PULLBACK"})
         return result
-    touch_idx = touch_indices[-1]
+    touch_idx = touch_indices[0]
     result.update({
         "pullback_touch": True,
         "pullback_timestamp": int(closed["timestamp"].iloc[touch_idx]),
@@ -2216,13 +2216,16 @@ def validate_ema915_vwap_location_first_entry_gate(
                 formed = int(float(formed))
                 if formed > latest_ts or latest_ts - formed > 48 * tf * 1000:
                     continue
+            status = str(zone.get("status") or "").upper()
+            if status and status not in {"CONFIRMED", "ACTIVE", "UNFILLED", "PARTIALLY_FILLED", "VALID"}:
+                continue
             if direction == "BUY":
                 if high < live:
                     continue
                 edge = max(live, low)
                 distance_atr = max(0.0, edge - live) / atr
                 target_ahead = target is not None and target > live
-                in_path = target_ahead and edge <= target
+                in_path = (target_ahead and edge <= target) if target_ahead else distance_atr <= float(min_opposing_room_atr)
                 target_distance = (target - live) if target_ahead else None
             else:
                 if low > live:
@@ -2230,7 +2233,7 @@ def validate_ema915_vwap_location_first_entry_gate(
                 edge = min(live, high)
                 distance_atr = max(0.0, live - edge) / atr
                 target_ahead = target is not None and target < live
-                in_path = target_ahead and edge >= target
+                in_path = (target_ahead and edge >= target) if target_ahead else distance_atr <= float(min_opposing_room_atr)
                 target_distance = (live - target) if target_ahead else None
             materially_blocks = (
                 distance_atr <= float(min_opposing_room_atr)
