@@ -166,11 +166,20 @@ def test_fresh_ema915_pullback_scanner_hints_are_merged_without_entry_authority(
             "entry_ready": False,
         },
     }
-    merged = merge_candidates({"ema9_vwap_proximity_scanner": [row]})
-    assert list(merged) == ["AVAX"]
+    alignment_row = {
+        **row,
+        "symbol": "MATIC/USDT:USDT",
+        "ema9_vwap_adaptive_strategy": {
+            **row["ema9_vwap_adaptive_strategy"],
+            "stage": "WAITING_FOR_ALIGNMENT",
+        },
+    }
+    merged = merge_candidates({"ema9_vwap_proximity_scanner": [row, alignment_row]})
+    assert set(merged) == {"AVAX", "MATIC"}
     assert merged["AVAX"]["sides"] == ["BUY"]
     assert "ema9_vwap_proximity_scanner" in merged["AVAX"]["sources"]
     assert merged["AVAX"]["ema9_vwap_adaptive_strategy"]["entry_ready"] is False
+    assert merged["MATIC"]["ema9_vwap_adaptive_strategy"]["stage"] == "WAITING_FOR_ALIGNMENT"
 
 
 def test_stale_or_non_directional_ema915_scanner_rows_are_not_candidates():
