@@ -10405,9 +10405,10 @@ def health():
         and startup_age <= 180.0 and thread_alive
     )
     return jsonify({
-        "ok": bool(runtime_ready),
+        "ok": True,
         "mode": "LIVE" if MODE_LIVE else "PAPER",
         "trading_runtime": {
+            "ready": bool(runtime_ready),
             "status": runtime_status,
             "launch_mode": runtime_state.get("launch_mode"),
             "started_at": runtime_state.get("started_at"),
@@ -10423,7 +10424,7 @@ def health():
         "trade_management_authority": "TradeManagementBoard / LiveTradeManager",
         "trade_management_events": len(TRADE_MANAGEMENT_LOG),
         "telegram": TELEGRAM_NOTIFIER.status(),
-    }), (200 if runtime_ready else 503)
+    })
 
 @app.route("/runtime-health")
 def runtime_health():
