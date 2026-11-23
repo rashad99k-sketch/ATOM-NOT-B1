@@ -98,9 +98,10 @@ def test_watchlist_candidate_priority_uses_directional_cross_and_ema_vwap_entry_
     assert "AUTHORITY.decide" in source  # retained for diagnostics/ranking, not entry veto
     assert "validate_ema915_vwap_location_first_entry_gate" in source
     assert "execute_entry remain the sole entry authorization path" in source
-    execute_start = source.index("def execute_entry(")
-    execute_end = source.index("\ndef dynamic_spread_tolerance(", execute_start)
-    execute = source[execute_start:execute_end]
+    bot_source = Path("ggpbot.py").read_text(encoding="utf-8")
+    execute_start = bot_source.index("def execute_entry(")
+    execute_end = bot_source.index("\ndef dynamic_spread_tolerance(", execute_start)
+    execute = bot_source[execute_start:execute_end]
     assert "EMA915_VWAP_LOCATION_FIRST" in execute
     assert "institutional analysis is location-only" in execute
     assert "causal_zone:" not in execute
