@@ -22,6 +22,7 @@ from roro_confluence import (
     classify_liquidity, find_causal_order_block, LiquidityEvent,
     validate_adaptive_ema9_vwap_entry_gate,
     validate_ema915_vwap_pullback_entry_gate,
+    validate_ema915_vwap_location_first_entry_gate,
 )
 from ggp_market_intelligence import (build_intelligence_decision, classify_price_pattern,
                                      build_support_resistance_zones, validate_order_block_zone)
@@ -593,106 +594,103 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     sr_aligned = sr_aligned_zone is not None
     d, golden = _decision_result(decision), context["golden_zone"]
 
-    # Complement the existing RORO engines with an executable EMA9/Session-VWAP
-    # lane.  It still requires a validated causal location plus directional
-    # structure or a matching liquidity event; a crossover by itself is never
-    # enough to manufacture a trade.
-    adaptive_gate = {
-        "ready": False, "decision_state": "WAIT", "entry_mode": "WAIT",
-        "reason": "adaptive_cross_not_evaluated",
+    # EMA9/EMA15 + Session VWAP is the only entry-pattern authority.
+    # Institutional engines remain active as diagnostics and location providers;
+    # they do not require sweep/MSS/BOS/OB approval for a valid EMA setup.
+    institutional_score = float(getattr(decision, "score", 0.0) or 0.0)
+    location_context = {
+        "support_resistance": context.get("support_resistance", {}),
+        "order_block": ob if isinstance(ob, dict) else {},
+        "fvg": fvg if isinstance(fvg, dict) else {},
+        "supply_zones": context.get("supply_zones", []),
+        "demand_zones": context.get("demand_zones", []),
+        "zones": context.get("zones", []),
     }
-    adaptive_zone = None
-    adaptive_zone_source = None
-    adaptive_zone_available_ts = None
-    if ob_ok and isinstance(ob, dict):
-        adaptive_zone = (float(ob.get("low", 0) or 0), float(ob.get("high", 0) or 0))
-        adaptive_zone_source = "ORDER_BLOCK"
-        adaptive_zone_available_ts = ob.get("impulse_timestamp", ob.get("timestamp"))
-    elif fvg_ok and isinstance(fvg, dict):
-        adaptive_zone = (float(fvg.get("lower", 0) or 0), float(fvg.get("upper", 0) or 0))
-        adaptive_zone_source = "FVG"
-        adaptive_zone_available_ts = fvg.get("timestamp")
-    elif sr_aligned and isinstance(sr_aligned_zone, dict):
-        adaptive_zone = (float(sr_aligned_zone.get("low", 0) or 0), float(sr_aligned_zone.get("high", 0) or 0))
-        adaptive_zone_source = "SUPPORT" if side == "BUY" else "RESISTANCE"
-        adaptive_zone_available_ts = sr_aligned_zone.get("source_timestamp", sr_aligned_zone.get("timestamp"))
-    if (adaptive_zone and not (0 < adaptive_zone[0] < adaptive_zone[1])):
-        adaptive_zone = None
-        adaptive_zone_source = None
+    try:
+        ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
+        adaptive_gate = validate_ema915_vwap_location_first_entry_gate(
+            closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
+            now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
+            max_cross_age_bars=8, pullback_lookback_bars=5,
+            max_extension_atr=1.5, location_context=location_context,
+        )
+    except Exception as adaptive_exc:
+        adaptive_gate = {
+            "ready": False, "decision_state": "INVALIDATED", "entry_mode": "WAIT",
+            "reason": f"ema915_location_gate_error:{type(adaptive_exc).__name__}",
+        }
 
-    expected_structure = "BULLISH" if side == "BUY" else "BEARISH"
-    expected_bos = "BULLISH_BOS" if side == "BUY" else "BEARISH_BOS"
-    structure = context.get("structure") if isinstance(context.get("structure"), dict) else {}
-    structure_confirmed = bool(
-        structure.get("confirmed")
-        and (str(structure.get("direction") or "").upper() == expected_structure
-             or str(structure.get("bos") or "").upper() == expected_bos)
-    )
-    liquidity_confirmed = bool(
-        str(liq_name).upper() in {"SWEEP", "GRAB", "FAILED_AUCTION"}
-        and str(liq_direction).upper() == expected_structure
-    )
-    if adaptive_zone is not None:
-        try:
-            ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
-            adaptive_gate = validate_ema915_vwap_pullback_entry_gate(
-                closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
-                now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
-                cross_lookback_candles=8, pullback_lookback_candles=5,
-                max_extension_atr=1.5, setup_mode="CONTINUATION",
-                entry_zone_low=adaptive_zone[0], entry_zone_high=adaptive_zone[1],
-                entry_zone_available_timestamp=adaptive_zone_available_ts,
-            )
-        except Exception as adaptive_exc:
-            adaptive_gate = {
-                "ready": False, "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED",
-                "reason": f"adaptive_gate_error:{type(adaptive_exc).__name__}",
-            }
+    adaptive_zone = None
+    adaptive_zone_source = "EMA915_VWAP_BAND"
+    adaptive_zone_available_ts = adaptive_gate.get("pullback_timestamp")
+    if adaptive_gate.get("entry_zone_low") is not None and adaptive_gate.get("entry_zone_high") is not None:
+        adaptive_zone = (float(adaptive_gate["entry_zone_low"]), float(adaptive_gate["entry_zone_high"]))
 
     adaptive_stop = None
-    adaptive_stop_reason = "adaptive_location_or_structure_not_confirmed"
-    if (adaptive_gate.get("ready") is True and adaptive_zone is not None
-            and (structure_confirmed or liquidity_confirmed)):
-        # Invalidation is anchored to the causal zone boundary, then buffered by
-        # the existing structural stop engine. Position sizing still applies its
-        # own max-risk cap; this path does not alter sizing or leverage.
-        structural_extreme = adaptive_zone[0] if side == "BUY" else adaptive_zone[1]
+    adaptive_stop_reason = "pullback_structure_not_confirmed"
+    gate_ready = adaptive_gate.get("ready") is True
+    if gate_ready:
+        structural_extreme = adaptive_gate.get("pullback_low") if side == "BUY" else adaptive_gate.get("pullback_high")
         adaptive_stop, adaptive_stop_reason = StructuralStopLossEngine.calculate(
             side, "EMA9_VWAP_ADAPTIVE", float(context["price"]),
             float(structural_extreme), float(context["atr"]),
         )
-        if adaptive_stop is not None:
-            adaptive_evidence = [
-                "ema9_ema15_cross_confirmed",
-                f"ema915_pullback_rejection_break:{adaptive_gate.get('entry_mode')}",
-                f"adaptive_entry:{adaptive_gate.get('entry_mode')}",
-                f"causal_zone:{adaptive_zone_source}",
-                "structure_confirmation:directional" if structure_confirmed else "liquidity_confirmation:directional_sweep",
-            ]
-            if context.get("volume_confirmed"):
-                adaptive_evidence.append("volume_expansion:confirmed")
-            else:
-                adaptive_evidence.append("volume_expansion:not_confirmed_context_only")
-            adaptive_evidence.append(f"ema50_context:{adaptive_gate.get('ema50_alignment', 'UNAVAILABLE')}")
-            adaptive_decision = InstitutionalDecision(
-                state=DecisionState.ENTRY_READY.value,
-                setup_type="EMA9_VWAP_ADAPTIVE",
-                side=side,
-                reason=str(adaptive_gate.get("reason") or "adaptive_cross_entry_ready"),
-                evidence=tuple(adaptive_evidence),
-                rejection_reasons=(),
-                event_id=f"EMA9EMA15VWAP:{canonical_symbol(symbol)}:{adaptive_gate.get('signal_candle_id') or ''}",
-                origin_timestamp=int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1]),
-                invalidation_level=float(adaptive_stop),
-                structural_stop=float(adaptive_stop),
-                score=float(getattr(decision, "score", 0.0) or 0.0),
-            )
-            # A ready, location-first EMA9/VWAP setup may authorize alongside
-            # legacy RORO candidates; a ready RORO setup retains precedence.
-            if decision.state != DecisionState.ENTRY_READY.value:
-                decision = adaptive_decision
-                d = _decision_result(decision)
-    # Explainable mode/entry-behavior classification. This is analytical metadata only;
+        if adaptive_stop is None:
+            gate_ready = False
+            adaptive_gate.update({"ready": False, "decision_state": "WAITING_FOR_CONFIRMATION",
+                                  "reason": f"structural_stop_invalid:{adaptive_stop_reason}"})
+
+    gate_state = str(adaptive_gate.get("decision_state") or "WAITING_FOR_CONFIRMATION")
+    if gate_ready:
+        decision_state = DecisionState.ENTRY_READY.value
+        decision_reason = str(adaptive_gate.get("reason") or "ema915_location_first_entry_ready")
+        decision_evidence = (
+            "closed_ema9_ema15_cross",
+            "session_vwap_directional_alignment",
+            "post_cross_pullback_touch",
+            "separate_directional_rejection_candle",
+            "later_closed_continuation_break",
+            f"location_filter:{adaptive_gate.get('location_status', 'UNKNOWN')}",
+        )
+        rejection_reasons = ()
+        event_id = f"EMA9EMA15VWAP:{canonical_symbol(symbol)}:{adaptive_gate.get('signal_candle_id') or ''}"
+        origin_timestamp = int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1])
+        structural_stop = float(adaptive_stop)
+    else:
+        decision_state = {
+            "WAITING_FOR_CROSS": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "WAITING_FOR_PULLBACK": DecisionState.WAITING_FOR_RETEST.value,
+            "WAITING_FOR_REJECTION": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "WAITING_FOR_CONFIRMATION": DecisionState.WAITING_FOR_CONFIRMATION.value,
+            "NO_CHASE": DecisionState.NO_CHASE.value,
+            "BLOCKED_BY_LOCATION": DecisionState.NO_CHASE.value,
+            "EXPIRED": DecisionState.EXPIRED.value,
+            "INVALIDATED": DecisionState.INVALIDATED.value,
+        }.get(gate_state, DecisionState.WAITING_FOR_CONFIRMATION.value)
+        decision_reason = str(adaptive_gate.get("reason") or "ema915_setup_pending")
+        decision_evidence = tuple(
+            value for value in (
+                f"cross:{adaptive_gate.get('cross_direction')}",
+                f"stage:{gate_state}",
+                f"location:{adaptive_gate.get('location_status')}",
+            ) if not value.endswith("None")
+        )
+        rejection_reasons = (decision_reason,)
+        event_id = None
+        origin_timestamp = adaptive_gate.get("cross_timestamp")
+        structural_stop = None
+
+    decision = InstitutionalDecision(
+        state=decision_state, setup_type="EMA9_VWAP_ADAPTIVE", side=side,
+        reason=decision_reason, evidence=tuple(decision_evidence),
+        rejection_reasons=tuple(rejection_reasons), event_id=str(event_id or ""),
+        origin_timestamp=int(origin_timestamp) if origin_timestamp else None,
+        invalidation_level=float(structural_stop) if structural_stop else None,
+        structural_stop=float(structural_stop) if structural_stop else None,
+        score=institutional_score,
+    )
+    d = _decision_result(decision)
+        # Explainable mode/entry-behavior classification. This is analytical metadata only;
     # UnifiedEntryAuthority and execute_entry remain the sole entry authorization path.
     _liq_conf = getattr(liq, "confidence", 0.0)
     _disp_atr = None

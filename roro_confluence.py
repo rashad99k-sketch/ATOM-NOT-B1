@@ -1966,3 +1966,302 @@ class EMA9VWAPConfluenceEngine:
         except Exception as exc:
             return False, f"indicator_error:{type(exc).__name__}", None
         return False, "no_signal", None
+
+
+def validate_ema915_vwap_location_first_entry_gate(
+    df: pd.DataFrame, side: str, ema_fn: Callable,
+    timeframe_seconds: int = 900, now_ms: Optional[int] = None,
+    current_price: Optional[float] = None, max_cross_age_bars: int = 8,
+    pullback_lookback_bars: int = 5, max_extension_atr: float = 1.5,
+    location_context: Optional[Dict[str, Any]] = None,
+    target_price: Optional[float] = None, min_opposing_room_atr: float = 0.5,
+    min_opposing_room_fraction: float = 0.35, **legacy_context: Any,
+) -> Dict[str, Any]:
+    """Primary EMA9/EMA15 + Session VWAP entry gate; institutional data is location-only.
+
+    Requires a fresh closed-bar EMA9/EMA15 cross, a later pullback touch, a
+    separate rejection candle, and a still-later close through the rejection
+    candle. No institutional sweep/MSS/BOS/OB is required to create the setup.
+    Confirmed opposing supply/resistance (BUY) or demand/support (SELL) only
+    blocks when it materially consumes the available path to TP1.
+    """
+    direction = str(side or "").strip().upper()
+    result: Dict[str, Any] = {
+        "ready": False, "side": direction, "trigger": "EMA9_EMA15_SESSION_VWAP_LOCATION_FIRST",
+        "decision_state": "WAITING_FOR_CONFIRMATION", "entry_mode": "WAIT",
+        "reason": "invalid_side", "cross_direction": None, "cross_timestamp": None,
+        "pullback_timestamp": None, "rejection_timestamp": None,
+        "signal_candle_timestamp": None, "signal_candle_id": None,
+        "ema9": None, "ema15": None, "vwap": None, "atr": None,
+        "trend_age_bars": None, "trend_extension_atr": None,
+        "pullback_touch": False, "rejection_confirmed": False,
+        "continuation_break": False, "pullback_low": None, "pullback_high": None,
+        "entry_zone_low": None, "entry_zone_high": None,
+        "location_status": "UNKNOWN", "location_reason": "location_not_evaluated",
+    }
+    if direction not in {"BUY", "SELL"}:
+        return result
+    if not validate_ohlcv(df):
+        result["reason"] = "invalid_ohlcv"
+        return result
+    tf = max(1, int(timeframe_seconds))
+    now_value = int(now_ms if now_ms is not None else time.time() * 1000)
+    closed = closed_candles(df, tf, now_ms=now_value)
+    if len(closed) < 20:
+        result["reason"] = "insufficient_closed_candles"
+        return result
+    latest_ts = int(closed["timestamp"].iloc[-1])
+    data_age = (now_value - (latest_ts + tf * 1000)) / 1000.0
+    if data_age < 0 or data_age > 2.0 * tf:
+        result.update({"reason": "stale_closed_candle_data", "data_age_seconds": data_age,
+                       "decision_state": "EXPIRED"})
+        return result
+    vwap = compute_session_vwap(closed, tf, now_ms=now_value)
+    if vwap is None or len(vwap) != len(closed):
+        result["reason"] = "session_vwap_unavailable"
+        return result
+    try:
+        close = closed["close"].astype(float)
+        ema9 = pd.Series(ema_fn(close, 9), index=closed.index, dtype=float)
+        ema15 = pd.Series(ema_fn(close, 15), index=closed.index, dtype=float)
+        tr = pd.concat([
+            (closed["high"] - closed["low"]).rename("hl"),
+            (closed["high"] - closed["close"].shift(1)).abs().rename("hc"),
+            (closed["low"] - closed["close"].shift(1)).abs().rename("lc"),
+        ], axis=1).max(axis=1)
+        atr = float(tr.rolling(14, min_periods=14).mean().iloc[-1])
+        e9_now, e15_now, vwap_now = float(ema9.iloc[-1]), float(ema15.iloc[-1]), float(vwap.iloc[-1])
+    except Exception as exc:
+        result["reason"] = f"indicator_calculation_failed:{type(exc).__name__}"
+        return result
+    if not all(np.isfinite(v) for v in (atr, e9_now, e15_now, vwap_now)) or atr <= 0:
+        result["reason"] = "indicator_or_atr_unavailable"
+        return result
+    result.update({
+        "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
+        "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
+        "closed_candle_count": int(len(closed)),
+    })
+    last_idx = len(closed) - 1
+    cross_idx = None
+    cross_direction = None
+    window = max(2, min(12, int(max_cross_age_bars)))
+    first_idx = max(1, last_idx - window + 1)
+    for idx in range(last_idx, first_idx - 1, -1):
+        previous_gap = float(ema9.iloc[idx - 1] - ema15.iloc[idx - 1])
+        current_gap = float(ema9.iloc[idx] - ema15.iloc[idx])
+        if previous_gap <= 0 < current_gap:
+            cross_idx, cross_direction = idx, "BULLISH"
+            break
+        if previous_gap >= 0 > current_gap:
+            cross_idx, cross_direction = idx, "BEARISH"
+            break
+    result["cross_direction"] = cross_direction
+    if cross_idx is None:
+        result["reason"] = "missing_fresh_ema9_ema15_cross"
+        result["decision_state"] = "WAITING_FOR_CROSS"
+        return result
+    cross_ts = int(closed["timestamp"].iloc[cross_idx])
+    cross_age = last_idx - cross_idx
+    result.update({"cross_timestamp": cross_ts, "trend_age_bars": cross_age})
+    expected_cross = "BULLISH" if direction == "BUY" else "BEARISH"
+    if cross_direction != expected_cross:
+        result.update({"reason": "ema9_ema15_cross_direction_mismatch",
+                       "decision_state": "INVALIDATED"})
+        return result
+    if cross_age < 3:
+        result.update({"reason": "waiting_for_post_cross_pullback",
+                       "decision_state": "WAITING_FOR_PULLBACK"})
+        return result
+    if cross_age > window:
+        result.update({"reason": "cross_window_expired", "decision_state": "EXPIRED"})
+        return result
+
+    # VWAP defines directional permission; the completed confirmation must remain
+    # on the correct side of VWAP and the EMA9/EMA15 stack.
+    last_close = float(close.iloc[-1])
+    aligned = (
+        e9_now > e15_now and last_close > vwap_now and e9_now > vwap_now
+        if direction == "BUY" else
+        e9_now < e15_now and last_close < vwap_now and e9_now < vwap_now
+    )
+    if not aligned:
+        result.update({"reason": "directional_vwap_or_ema_alignment_lost",
+                       "decision_state": "INVALIDATED"})
+        return result
+
+    # Pullback must occur after the cross and before two distinct later candles:
+    # rejection, then continuation close through that rejection candle.
+    touch_start = max(cross_idx + 1, last_idx - max(2, int(pullback_lookback_bars)) - 2)
+    touch_indices = []
+    for idx in range(touch_start, last_idx - 1):
+        band_low = min(float(ema9.iloc[idx]), float(ema15.iloc[idx]), float(vwap.iloc[idx]))
+        band_high = max(float(ema9.iloc[idx]), float(ema15.iloc[idx]), float(vwap.iloc[idx]))
+        candle_low = float(closed["low"].iloc[idx])
+        candle_high = float(closed["high"].iloc[idx])
+        if candle_low <= band_high + 0.15 * atr and candle_high >= band_low - 0.15 * atr:
+            touch_indices.append(idx)
+    if not touch_indices:
+        result.update({"reason": "waiting_for_pullback_touch",
+                       "decision_state": "WAITING_FOR_PULLBACK"})
+        return result
+    touch_idx = touch_indices[-1]
+    result.update({
+        "pullback_touch": True,
+        "pullback_timestamp": int(closed["timestamp"].iloc[touch_idx]),
+        "pullback_low": float(closed["low"].iloc[touch_idx]),
+        "pullback_high": float(closed["high"].iloc[touch_idx]),
+    })
+
+    rejection_idx = None
+    for idx in range(touch_idx + 1, last_idx):
+        o = float(closed["open"].iloc[idx]); h = float(closed["high"].iloc[idx])
+        lo = float(closed["low"].iloc[idx]); c = float(closed["close"].iloc[idx])
+        span = max(h - lo, 1e-12)
+        lower_wick = (min(o, c) - lo) / span
+        upper_wick = (h - max(o, c)) / span
+        if direction == "BUY":
+            confirmed = c > o and c > float(vwap.iloc[idx]) and lower_wick >= 0.10
+        else:
+            confirmed = c < o and c < float(vwap.iloc[idx]) and upper_wick >= 0.10
+        if confirmed:
+            rejection_idx = idx
+            break
+    if rejection_idx is None:
+        result.update({"reason": "waiting_for_separate_directional_rejection",
+                       "decision_state": "WAITING_FOR_REJECTION"})
+        return result
+    rejection_high = float(closed["high"].iloc[rejection_idx])
+    rejection_low = float(closed["low"].iloc[rejection_idx])
+    result.update({
+        "rejection_confirmed": True,
+        "rejection_timestamp": int(closed["timestamp"].iloc[rejection_idx]),
+        "pullback_low": min(float(result["pullback_low"]), float(closed["low"].iloc[rejection_idx])),
+        "pullback_high": max(float(result["pullback_high"]), float(closed["high"].iloc[rejection_idx])),
+    })
+    confirmation = (
+        last_close > rejection_high and last_close > float(closed["open"].iloc[-1])
+        if direction == "BUY" else
+        last_close < rejection_low and last_close < float(closed["open"].iloc[-1])
+    )
+    if not confirmation:
+        result.update({"reason": "waiting_for_closed_continuation_break",
+                       "decision_state": "WAITING_FOR_CONFIRMATION"})
+        return result
+    result.update({
+        "continuation_break": True,
+        "signal_candle_timestamp": latest_ts,
+        "signal_candle_id": f"{cross_ts}:{int(result['pullback_timestamp'])}:{int(result['rejection_timestamp'])}:{latest_ts}",
+        "entry_mode": "PULLBACK_RETEST_REJECTION_BREAK",
+    })
+
+    live = float(current_price) if current_price is not None else last_close
+    if not np.isfinite(live) or live <= 0:
+        result["reason"] = "invalid_live_reference_price"
+        return result
+    extension = abs(live - e9_now) / atr
+    directional_extension = max(0.0, (live - e9_now) / atr if direction == "BUY" else (e9_now - live) / atr)
+    result.update({"live_price": live, "ema9_extension_atr": extension,
+                   "trend_extension_atr": directional_extension,
+                   "max_extension_atr": float(max_extension_atr)})
+    if directional_extension > float(max_extension_atr):
+        result.update({"reason": "entry_window_missed_no_chase",
+                       "decision_state": "NO_CHASE"})
+        return result
+
+    # Institutional analysis is deliberately a location filter, not a setup engine.
+    # Missing/unknown zones are diagnostic only; only a nearby opposing zone in the
+    # path to TP1 can veto an otherwise valid EMA9/EMA15/VWAP setup.
+    ctx = location_context if isinstance(location_context, dict) else {}
+    sr = ctx.get("support_resistance") if isinstance(ctx.get("support_resistance"), dict) else {}
+    opposing_key = "resistances" if direction == "BUY" else "supports"
+    zones = []
+    zones.extend([z for z in (sr.get(opposing_key) or []) if isinstance(z, dict)])
+    extra_key = "supply_zones" if direction == "BUY" else "demand_zones"
+    zones.extend([z for z in (ctx.get(extra_key) or []) if isinstance(z, dict)])
+    for z in (ctx.get("zones") or []):
+        if not isinstance(z, dict):
+            continue
+        kind = str(z.get("kind") or z.get("type") or "").upper()
+        if direction == "BUY" and any(token in kind for token in ("SUPPLY", "RESISTANCE")):
+            zones.append(z)
+        if direction == "SELL" and any(token in kind for token in ("DEMAND", "SUPPORT")):
+            zones.append(z)
+    for key in ("order_block", "fvg"):
+        z = ctx.get(key)
+        if not isinstance(z, dict):
+            continue
+        tag = " ".join(str(z.get(k) or "") for k in ("direction", "side", "kind", "type")).upper()
+        if direction == "BUY" and any(token in tag for token in ("BEARISH", "SUPPLY", "RESISTANCE")):
+            zones.append(z)
+        elif direction == "SELL" and any(token in tag for token in ("BULLISH", "DEMAND", "SUPPORT")):
+            zones.append(z)
+
+    opposing = []
+    target = None
+    try:
+        target = float(target_price) if target_price is not None else None
+        if target is not None and not np.isfinite(target):
+            target = None
+    except (TypeError, ValueError, OverflowError):
+        target = None
+    for zone in zones:
+        try:
+            low = float(zone.get("low", zone.get("lower", zone.get("price", zone.get("level")))))
+            high = float(zone.get("high", zone.get("upper", zone.get("price", zone.get("level")))))
+            if not all(np.isfinite(v) and v > 0 for v in (low, high)) or high < low:
+                continue
+            formed = zone.get("confirmed_at_timestamp", zone.get("available_timestamp", zone.get("timestamp")))
+            if formed is not None:
+                formed = int(float(formed))
+                if formed > latest_ts or latest_ts - formed > 48 * tf * 1000:
+                    continue
+            if direction == "BUY":
+                if high < live:
+                    continue
+                edge = max(live, low)
+                distance_atr = max(0.0, edge - live) / atr
+                target_ahead = target is not None and target > live
+                in_path = target_ahead and edge <= target
+                target_distance = (target - live) if target_ahead else None
+            else:
+                if low > live:
+                    continue
+                edge = min(live, high)
+                distance_atr = max(0.0, live - edge) / atr
+                target_ahead = target is not None and target < live
+                in_path = target_ahead and edge >= target
+                target_distance = (live - target) if target_ahead else None
+            materially_blocks = (
+                distance_atr <= float(min_opposing_room_atr)
+                or (in_path and target_distance and target_distance > 0
+                    and distance_atr / (target_distance / atr) < float(min_opposing_room_fraction))
+            )
+            opposing.append({
+                "kind": str(zone.get("kind") or zone.get("type") or opposing_key).upper(),
+                "low": low, "high": high, "distance_atr": distance_atr,
+                "in_path_to_target": bool(in_path), "blocks": bool(in_path and materially_blocks),
+            })
+        except (TypeError, ValueError, OverflowError):
+            continue
+    blocking = [z for z in opposing if z.get("blocks")]
+    if blocking:
+        nearest = min(blocking, key=lambda z: z["distance_atr"])
+        result.update({
+            "reason": "opposing_institutional_zone_blocks_available_room",
+            "decision_state": "BLOCKED_BY_LOCATION",
+            "location_status": "OPPOSING_ZONE_TOO_CLOSE",
+            "location_reason": f"{nearest['kind']} at {nearest['distance_atr']:.3f} ATR before TP1",
+            "opposing_zone": nearest,
+        })
+        return result
+    result.update({
+        "ready": True, "decision_state": "ENTRY_READY",
+        "reason": "ema915_cross_pullback_rejection_break_vwap_aligned_location_clear",
+        "location_status": "CLEAR" if opposing else "UNKNOWN_NON_BLOCKING",
+        "location_reason": "opposing_zone_clear" if opposing else "no_confirmed_opposing_zone; non_blocking",
+        "opposing_zones_checked": opposing,
+        "entry_zone_low": min(e9_now, e15_now, vwap_now) - 0.15 * atr,
+        "entry_zone_high": max(e9_now, e15_now, vwap_now) + 0.15 * atr,
+    })
+    return result
