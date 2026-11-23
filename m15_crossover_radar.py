@@ -126,7 +126,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     # used by the independent entry diagnostics; never authorize entry here.
     recent_cross_idx = None
     recent_cross_side = None
-    recent_start = max(1, len(closed) - M15_CROSS_LOOKBACK_BARS)
+    recent_start = max(1, len(closed) - 1 - M15_CROSS_LOOKBACK_BARS)
     for cross_idx in range(len(closed) - 1, recent_start - 1, -1):
         previous_gap = float(gap_series.iloc[cross_idx - 1])
         current_gap = float(gap_series.iloc[cross_idx])
@@ -248,7 +248,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
         "setup_quality": None, "opportunity_priority": None,
         "evidence": {
             "closed_m15_confirmed": bool(recent_cross_side),
-            "intrabar_only": bool(intrabar_side and not confirmed_side),
+            "intrabar_only": bool(intrabar_side and not recent_cross_side),
             "ema_gap_contracting": bool(contracted),
             "body_to_range": round(body_ratio, 5) if body_ratio is not None else None,
             "close_position": round(close_position, 5) if close_position is not None else None,
