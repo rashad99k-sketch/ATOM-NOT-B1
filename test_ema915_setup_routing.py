@@ -42,7 +42,7 @@ REVERSAL_EVIDENCE = [
 def test_reversal_uses_crossover_as_trigger_then_requires_institutional_sweep_mss_retest():
     frame, now_ms = _cross_frame()
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=float(frame["close"].iloc[-1]),
         setup_mode="LIQUIDITY_SWEEP_REVERSAL",
         institutional_evidence=REVERSAL_EVIDENCE,
@@ -187,7 +187,7 @@ def _impulse_frame(side="BUY"):
         min(open_price, close_price) - 0.05, close_price, 300.0
     ]
 
-    def impulse_ema(values, period):
+    def _ema(values, period):
         if period == 9:
             if side == "BUY":
                 arr = np.full(len(values), 101.8, dtype=float)
@@ -208,14 +208,14 @@ def _impulse_frame(side="BUY"):
         monkeypatch_vwap, index=closed.index, dtype=float
     )
     live = close_price + 0.02 * direction
-    return frame, int(frame.timestamp.iloc[-1] + 901_000), live, impulse_ema
+    return frame, int(frame.timestamp.iloc[-1] + 901_000), live, _ema
 
 
 
 def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypatch):
     frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
         entry_zone_low=101.8, entry_zone_high=102.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
@@ -242,10 +242,10 @@ def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypa
 
 
 def test_impulse_requires_all_three_quality_confirmations_and_bos():
-    frame, now_ms, live = _impulse_frame("BUY")
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
     frame.loc[len(frame)-1, "volume"] = 100.0
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
         entry_zone_low=99.8, entry_zone_high=101.0,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
