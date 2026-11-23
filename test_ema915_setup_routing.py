@@ -158,7 +158,7 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
     assert result["reason"] == "institutional_sweep_timestamp_unavailable"
 
 
-def _impulse_frame(side="BUY"):
+def _impulse_frame(side="BUY", monkeypatch=None):
     import numpy as np
     import roro_confluence as confluence
 
@@ -218,7 +218,7 @@ def _impulse_frame(side="BUY"):
 
 
 def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypatch):
-    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY", monkeypatch)
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
@@ -233,7 +233,7 @@ def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypa
 
 
 def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypatch):
-    frame, now_ms, live, impulse_ema = _impulse_frame("SELL")
+    frame, now_ms, live, impulse_ema = _impulse_frame("SELL", monkeypatch)
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "SELL", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
