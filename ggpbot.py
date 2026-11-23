@@ -9971,7 +9971,10 @@ function updateUI(d) {{
         <small>Closed M15 confirmation: ${{item.evidence?.closed_m15_confirmed ? "YES" : "NO"}} · Intrabar provisional: ${{item.evidence?.intrabar_only ? "YES (not confirmed)" : "NO"}} · Signal time ${{item.signal_timestamp_ms ? new Date(item.signal_timestamp_ms).toLocaleString() : "—"}} · Updated ${{item.last_update_ms ? new Date(item.last_update_ms).toLocaleTimeString() : "—"}}</small></details>`;
     }}).join("");
     const radarUpdated = radarMeta.last_update_ms ? new Date(radarMeta.last_update_ms).toLocaleTimeString() : "—";
-    const radarSummary = "<small>State: " + radarEsc(radarMeta.state || "NOT_STARTED")
+    const radarAgeMs = radarMeta.last_update_ms ? Date.now() - Number(radarMeta.last_update_ms) : null;
+    const radarStatus = !radarMeta.last_update_ms ? "SCANNER_NOT_RUNNING"
+        : radarAgeMs > 90000 ? "STALE" : (radarMeta.state || "UNKNOWN");
+    const radarSummary = "<small>State: " + radarEsc(radarStatus)
         + " · Processed frames: " + radarEsc(radarMeta.frames_processed_total ?? 0)
         + " · Candidates: " + radarEsc(radarMeta.candidate_count ?? radarRows.length)
         + " (confirmed " + radarEsc(radarMeta.confirmed_count ?? 0)
@@ -9979,14 +9982,16 @@ function updateUI(d) {{
         + ", provisional " + radarEsc(radarMeta.provisional_count ?? 0)
         + ") · Updated: " + radarUpdated
         + " · Source: " + radarEsc(radarMeta.source || "—") + "</small><hr>";
-    const radarEmptyMessage = radarMeta.state === "PARTIAL_DATA"
+    const radarEmptyMessage = radarStatus === "DATA_UNAVAILABLE" || radarStatus === "PARTIAL_DATA"
         ? "M15 scanner received incomplete data for " + radarEsc(radarMeta.last_symbol)
           + "; previous valid candidates are retained. Reason: " + radarEsc(radarMeta.last_data_error)
-        : radarMeta.state === "NO_CANDIDATES"
+        : radarStatus === "NO_CANDIDATES"
             ? "Scanner is active on shared closed M15 frames; no fresh or pre-cross candidates currently qualify."
-            : radarMeta.state === "NOT_STARTED"
-                ? "Waiting for Scanner-2 to supply its first shared closed M15 frame; no duplicate exchange scan is running."
-                : "No qualifying M15 candidates in the latest shared-frame update.";
+            : radarStatus === "SCANNER_NOT_RUNNING"
+                ? "M15 radar has not received a Scanner-2 frame yet; no duplicate exchange scan is running."
+                : radarStatus === "STALE"
+                    ? "M15 radar has not refreshed in over 90 seconds; treat displayed candidates as stale until a new closed frame arrives."
+                    : "No qualifying M15 candidates in the latest shared-frame update.";
     document.getElementById("m15-crossover-panel").innerHTML = radarSummary + (radarCards || radarEmptyMessage);
     if(d.watchlist) {{
         let wHtml = "";
