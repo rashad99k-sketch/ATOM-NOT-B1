@@ -144,3 +144,35 @@ def test_tp1_already_crossed_cannot_authorize_late_entry(monkeypatch):
     assert result["ready"] is False
     assert result["decision_state"] == "NO_CHASE"
     assert result["reason"] == "tp1_target_already_crossed_or_no_room"
+
+
+def test_macro_pullback_can_retest_ema50_after_the_primary_cross(monkeypatch):
+    frame = _market("BUY")
+    frame.loc[55, ["open", "high", "low", "close"]] = [100.1, 100.2, 98.9, 99.5]
+    frame.loc[56, ["open", "high", "low", "close"]] = [99.5, 100.5, 98.8, 100.3]
+    frame.loc[59, ["open", "high", "low", "close"]] = [100.4, 101.0, 100.3, 100.8]
+
+    def macro_ema(values, period):
+        if period == 9:
+            arr = np.full(len(values), 100.2); arr[52:] = 100.8
+        elif period == 15:
+            arr = np.full(len(values), 100.4); arr[52:] = 100.5
+        else:
+            arr = np.full(len(values), 99.0)
+        return pd.Series(arr, index=values.index)
+
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(100.0, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_location_first_entry_gate(
+        frame, "BUY", macro_ema, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=100.8,
+        max_cross_age_bars=8, pullback_lookback_bars=5, max_extension_atr=1.5,
+        location_context={}, target_price=102.0,
+    )
+    assert result["ready"] is True
+    assert result["pullback_type"] == "MACRO_PULLBACK"
+    assert result["macro_pullback_touch"] is True
+    assert result["entry_mode"] == "MACRO_PULLBACK_REJECTION_BREAK"
+    assert result["entry_zone_high"] < 100.0
