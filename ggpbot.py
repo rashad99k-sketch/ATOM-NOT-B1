@@ -9849,6 +9849,10 @@ body{{background:#0b0f14;color:#e6edf3;font-family:Consolas;margin:0}}
 <script>
 let lastFetch = 0;
 let cachedData = null;
+function dashboardNumber(value, digits=2, fallback="—") {{
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : fallback;
+}}
 async function fetchData() {{
     const now = Date.now();
     if (cachedData && (now - lastFetch) < 2000) {{
@@ -9857,23 +9861,35 @@ async function fetchData() {{
     }}
     lastFetch = now;
     try {{
-        const r = await fetch('/data');
+        const r = await fetch('/data', {{cache: 'no-store'}});
+        if (!r.ok) throw new Error('Dashboard API HTTP ' + r.status);
         const d = await r.json();
+        if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('Dashboard API returned invalid JSON shape');
         cachedData = d;
         updateUI(d);
-    }} catch(e) {{ console.error(e); }}
+    }} catch(e) {{
+        console.error('[DASHBOARD_REFRESH]', e);
+        const status = document.getElementById("botStatus");
+        if (status) status.innerText = "API ERROR: " + (e?.message || "refresh failed");
+    }}
 }}
 function updateUI(d) {{
-    document.getElementById("bal").innerText = d.balance.toFixed(2);
-    document.getElementById("free_bal").innerText = "$" + d.free_balance.toFixed(2);
-    document.getElementById("avail_margin").innerText = "Margin: " + d.avail_margin.toFixed(2);
-    document.getElementById("mode").innerText = d.mode;
-    document.getElementById("trades").innerText = d.stats.trades;
-    document.getElementById("wins").innerText = d.stats.wins;
-    document.getElementById("losses").innerText = d.stats.losses;
-    document.getElementById("winrate").innerText = d.stats.win_rate.toFixed(1)+"%";
+    if (!d || typeof d !== "object" || d.error) {{
+        const status = document.getElementById("botStatus");
+        if (status) status.innerText = "DATA ERROR: " + (d?.error || "invalid payload");
+        return;
+    }}
+    const stats = d.stats && typeof d.stats === "object" ? d.stats : {{}};
+    document.getElementById("bal").innerText = dashboardNumber(d.balance);
+    document.getElementById("free_bal").innerText = "$" + dashboardNumber(d.free_balance);
+    document.getElementById("avail_margin").innerText = "Margin: " + dashboardNumber(d.avail_margin);
+    document.getElementById("mode").innerText = d.mode || "UNKNOWN";
+    document.getElementById("trades").innerText = stats.trades ?? 0;
+    document.getElementById("wins").innerText = stats.wins ?? 0;
+    document.getElementById("losses").innerText = stats.losses ?? 0;
+    document.getElementById("winrate").innerText = dashboardNumber(stats.win_rate, 1, "0.0")+"%";
     document.getElementById("total_pnl").innerHTML = d.total_pnl || "0%";
-    document.getElementById("total_pnl_usdt").innerHTML = d.total_pnl_usdt ? d.total_pnl_usdt.toFixed(2) : "0.00";
+    document.getElementById("total_pnl_usdt").innerHTML = dashboardNumber(d.total_pnl_usdt, 2, "0.00");
     document.getElementById("last_trade").innerText = d.last_trade || "N/A";
     if(d.position) {{
         let pnlClass = d.position.pnl >= 0 ? "green" : "red";
@@ -9945,7 +9961,7 @@ function updateUI(d) {{
             <div>Risks: ${{(t.risk_factors || []).join(", ")}}</div>
         `;
     }}
-    document.getElementById("current_conf").innerHTML = (d.current_confidence || 50).toFixed(1);
+    document.getElementById("current_conf").innerHTML = dashboardNumber(d.current_confidence ?? 50, 1, "—");
     document.getElementById("market_regime").innerHTML = d.market_regime || "UNKNOWN";
     document.getElementById("cont_pressure").innerHTML = d.continuation_pressure || 50;
     document.getElementById("thesis_failure").innerHTML = d.thesis_failure_score || 0;
@@ -9953,7 +9969,7 @@ function updateUI(d) {{
     document.getElementById("errors").innerHTML = (d.errors || []).slice(-5).join("<br>");
     let top5Html = "";
     (d.top5 || []).forEach(o => {{
-        top5Html += `<div><b>${{o.symbol}}</b> | Score: ${{o.score.toFixed(2)}} | ADX: ${{o.adx || 0}} | RSI: ${{o.rsi || 0}}</div><hr>`;
+        top5Html += `<div><b>${{o.symbol || "UNKNOWN"}}</b> | Score: ${{dashboardNumber(o.score, 2)}} | ADX: ${{dashboardNumber(o.adx, 1, "—")}} | RSI: ${{dashboardNumber(o.rsi, 1, "—")}}</div><hr>`;
     }});
     document.getElementById("top5").innerHTML = top5Html || "No opportunities";
     document.getElementById("scanned").innerText = d.scanned_count;
@@ -9966,7 +9982,7 @@ function updateUI(d) {{
         let rfHtml = "";
         d.rf_dashboard.forEach(item => {{
             let signalIcon = item.signal === "BUY" ? "🟢" : (item.signal === "SELL" ? "🔴" : "⚪");
-            rfHtml += `<div>${{item.icon}} ${{signalIcon}} ${{item.symbol}} | ${{item.status}} | score=${{item.score.toFixed(2)}} | ADX=${{item.adx||0}} | RSI=${{item.rsi||0}}</div>`;
+            rfHtml += `<div>${{item.icon || "📡"}} ${{signalIcon}} ${{item.symbol || "UNKNOWN"}} | ${{item.status || "UNKNOWN"}} | score=${{dashboardNumber(item.score, 2)}} | ADX=${{dashboardNumber(item.adx, 1, "—")}} | RSI=${{dashboardNumber(item.rsi, 1, "—")}}</div>`;
         }});
         document.getElementById("rfSignals").innerHTML = rfHtml || "No RF signals";
     }}
