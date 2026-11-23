@@ -79,3 +79,13 @@ def test_global_discovery_publishes_progress_stage_transitions():
     node = _function(source, "run_global_discovery_scanner")
     constants = {item.value for item in ast.walk(node) if isinstance(item, ast.Constant)}
     assert {"LOAD_UNIVERSE", "SCANNER_V2", "PROFESSIONAL_SCAN", "RF_SCAN", "RADAR", "COMPLETE"}.issubset(constants)
+
+
+
+def test_partial_account_refresh_preserves_last_known_other_balance_field():
+    snapshot = DashboardAccountSnapshot()
+    snapshot.update(125.0, 100.0, now=100.0)
+    partial = snapshot.update(None, 90.0, now=110.0)
+    assert partial["balance"] == 125.0
+    assert partial["free_balance"] == 90.0
+    assert partial["status"] == "VALID"
