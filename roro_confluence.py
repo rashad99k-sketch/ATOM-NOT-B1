@@ -842,7 +842,9 @@ def validate_ema915_vwap_pullback_entry_gate(
         "ema20_slope": ema20_slope, "ema50_slope": ema50_slope,
         "macro_trend_aligned": bool(macro_trend_aligned),
     })
-    if not aligned and not macro_trend_aligned:
+    # Macro alignment is a continuation-only allowance. Never let the
+    # deeper-pullback exception weaken the existing reversal/VWAP rule.
+    if not aligned and (is_reversal_setup or not macro_trend_aligned):
         result.update({"reason": "ema915_or_vwap_direction_not_aligned",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
