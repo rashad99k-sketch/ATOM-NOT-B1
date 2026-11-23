@@ -11337,7 +11337,7 @@ def sniper_engine_v2():
 
 
 def _run_sniper_scan_if_due():
-    """Run synchronously inside the supervisor; avoid racing the other entry path."""
+    """Run the Sniper provider inside the serialized background candidate worker."""
     global _SNIPER_V2_LAST_SCAN
     if not SNIPER_V2_ENABLED:
         return False
@@ -11346,6 +11346,34 @@ def _run_sniper_scan_if_due():
         return False
     _SNIPER_V2_LAST_SCAN = now
     return sniper_engine_v2()
+
+
+def run_candidate_pipeline():
+    """Run Watchlist refresh, final entry revalidation and Sniper sequentially off the supervisor thread.
+
+    This worker is intentionally serialized: the two candidate providers must not
+    race each other, while the main supervisor remains free to publish heartbeats
+    and manage an open position.
+    """
+    meta = MEMORY.setdefault("candidate_pipeline", {})
+    started = time.time()
+    meta.update({"state": "RUNNING", "stage": "WATCHLIST_AND_ENTRY", "started_at": started,
+                 "last_progress_at": started, "last_error": None})
+    try:
+        selected = bool(smart_opportunity_selection())
+        meta.update({"stage": "SNIPER_SCAN", "last_progress_at": time.time(),
+                     "watchlist_entry_result": selected})
+        sniper_result = False
+        if not _discovery_paused():
+            sniper_result = bool(_run_sniper_scan_if_due())
+        meta.update({"state": "IDLE", "stage": "COMPLETE", "last_completed": time.time(),
+                     "duration_seconds": round(time.time() - started, 3),
+                     "sniper_result": sniper_result})
+        return selected or sniper_result
+    except Exception as exc:
+        meta.update({"state": "ERROR", "stage": "ERROR", "last_completed": time.time(),
+                     "last_error": f"{type(exc).__name__}: {str(exc)[:180]}"})
+        raise
 
 
 # ========== SCANNER CONTEXT MODE – update institutional flow without a trade ==========
@@ -11448,6 +11476,9 @@ def update_institutional_flow_scanner():
 
 
 # ========== LIVE INSTITUTIONAL UPDATER THREAD (PAUSED DURING TRADE) ==========
+INSTITUTIONAL_FLOW_REFRESH_SECONDS = _env_int_range("INSTITUTIONAL_FLOW_REFRESH_SECONDS", 60, 30, 300)
+
+
 def live_institutional_updater():
     while True:
         try:
@@ -11468,7 +11499,9 @@ def live_institutional_updater():
         except Exception as exc:
             _mark_institutional_flow_unavailable(f"{type(exc).__name__}:{str(exc)[:120]}", DEFAULT_SYMBOL)
             log_execution(f"[LIVE_UPDATER] Error: {exc}", "ERROR")
-        time.sleep(5)
+        # One updater owns this feed. A five-second OHLCV poll was duplicating
+        # scanner traffic and competing with the global + rotating scanners.
+        time.sleep(INSTITUTIONAL_FLOW_REFRESH_SECONDS)
 
 # ========== MAIN LOOP ==========
 MEMORY = {
@@ -11498,6 +11531,7 @@ MEMORY = {
     "unified_watchlist_last_update": 0,
     "position_status": "UNKNOWN",
     "recovery_status": "NOT_STARTED",
+    "candidate_pipeline": {"state": "IDLE", "stage": "IDLE"},
     "no_entry_feed": []
 }
 
@@ -11597,7 +11631,6 @@ def main_loop_sniper():
     global INSUFFICIENT_MARGIN_COOLDOWN_UNTIL, RECOVERY_BLOCK_ENTRIES
     last_scan = 0
     last_candidate_scan = 0
-    last_flow_update = 0
     try:
         ex.load_markets()
         log_execution(f"Markets loaded", "INFO")
@@ -11630,10 +11663,6 @@ def main_loop_sniper():
                 time.sleep(1)
                 continue
 
-            if not _discovery_paused() and now - last_flow_update > 60:
-                update_institutional_flow_scanner()
-                last_flow_update = now
-
             if not _discovery_paused():
                 sync_position_state()
                 if STATE.get("open"):
@@ -11654,16 +11683,13 @@ def main_loop_sniper():
                 if now - last_scan >= GLOBAL_SCAN_INTERVAL:
                     dispatch_scanner_task("global_discovery", run_global_discovery_scanner)
                     last_scan = now
-                # Scanner 2 is the rotating institutional/proximity Watchlist pass.
-                # smart_opportunity_selection() refreshes it at the configured batch interval,
-                # sharing the exact OHLCV frame with OB/FVG/liquidity/structure analysis.
+                # Scanner 2 + Sniper are serialized in a bounded background worker.
+                # The supervisor must never wait on multi-symbol OHLCV/structure analysis:
+                # it keeps heartbeats current and remains available for trade management.
                 if not (INSUFFICIENT_MARGIN_COOLDOWN_UNTIL and time.time() < INSUFFICIENT_MARGIN_COOLDOWN_UNTIL):
                     if now - last_candidate_scan >= CANDIDATE_SCAN_INTERVAL:
-                        smart_opportunity_selection()
+                        dispatch_scanner_task("candidate_pipeline", run_candidate_pipeline)
                         last_candidate_scan = now
-                    # Sniper is an entry-only candidate engine; it never runs while
-                    # a position is open and uses the same bounded scanner cache.
-                    _run_sniper_scan_if_due()
                     time.sleep(1)
                 else:
                     time.sleep(1)
