@@ -10396,8 +10396,16 @@ def health():
         runtime_status = "STARTING"
     elif runtime_status == "RUNNING" and (heartbeat_age is None or heartbeat_age > 90.0):
         runtime_status = "STALE"
+    thread_alive = bool(runtime_state.get("thread_alive", False))
+    runtime_ready = (
+        runtime_status == "RUNNING" and heartbeat_age is not None
+        and heartbeat_age <= 90.0 and thread_alive
+    ) or (
+        runtime_status == "STARTING" and startup_age is not None
+        and startup_age <= 180.0 and thread_alive
+    )
     return jsonify({
-        "ok": True,
+        "ok": bool(runtime_ready),
         "mode": "LIVE" if MODE_LIVE else "PAPER",
         "trading_runtime": {
             "status": runtime_status,
@@ -10415,7 +10423,7 @@ def health():
         "trade_management_authority": "TradeManagementBoard / LiveTradeManager",
         "trade_management_events": len(TRADE_MANAGEMENT_LOG),
         "telegram": TELEGRAM_NOTIFIER.status(),
-    })
+    }), (200 if runtime_ready else 503)
 
 @app.route("/runtime-health")
 def runtime_health():
