@@ -121,7 +121,8 @@ def test_no_chase_uses_live_price_extension_in_atr(monkeypatch):
 def test_wrong_side_cross_cannot_authorize(monkeypatch):
     result = _run(monkeypatch, "SELL", price=101.0)
     assert result["ready"] is False
-    assert result["reason"] == "entry_window_missed_no_chase" or result["decision_state"] == "INVALIDATED"
+    assert result["reason"] == "live_price_vwap_alignment_lost"
+    assert result["decision_state"] == "INVALIDATED"
 
 
 def test_closed_candle_freshness_is_required(monkeypatch):

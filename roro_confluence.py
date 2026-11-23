@@ -2159,6 +2159,11 @@ def validate_ema915_vwap_location_first_entry_gate(
     if not np.isfinite(live) or live <= 0:
         result["reason"] = "invalid_live_reference_price"
         return result
+    live_vwap_aligned = live > vwap_now if direction == "BUY" else live < vwap_now
+    if not live_vwap_aligned:
+        result.update({"reason": "live_price_vwap_alignment_lost",
+                       "decision_state": "INVALIDATED"})
+        return result
     extension = abs(live - e9_now) / atr
     directional_extension = max(0.0, (live - e9_now) / atr if direction == "BUY" else (e9_now - live) / atr)
     result.update({"live_price": live, "ema9_extension_atr": extension,
