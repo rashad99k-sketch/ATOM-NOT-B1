@@ -1071,6 +1071,33 @@ def validate_ema915_vwap_pullback_entry_gate(
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
+    # A causal-zone retest remains valid only while the protected swing survives
+    # through the subsequent rejection and breakout candles. Use closed-candle
+    # closes (not isolated wicks) for structural invalidation.
+    if pullback_type in {"RETEST", "MACRO_PULLBACK"}:
+        protected_level = result.get("protected_swing_level")
+        if protected_level is not None:
+            protected_level = float(protected_level)
+            for idx in range(pullback_idx + 1, len(closed)):
+                close_after_pullback = float(closed["close"].iloc[idx])
+                swing_broken = (
+                    close_after_pullback < protected_level - 0.10 * atr
+                    if direction == "BUY"
+                    else close_after_pullback > protected_level + 0.10 * atr
+                )
+                if swing_broken:
+                    result.update({
+                        "ready": False, "entry_mode": "INVALIDATED",
+                        "reason": "retest_swing_invalidated",
+                        "retest_invalidated": True,
+                        "invalidation_timestamp": int(closed["timestamp"].iloc[idx]),
+                        "protected_swing_level": protected_level,
+                        "cross_direction": cross_direction,
+                        "cross_timestamp": cross_ts,
+                        "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx]),
+                    })
+                    return result
+
     pullback_ts = int(closed["timestamp"].iloc[pullback_idx])
     result.update({
         "pullback_touch": True, "pullback_timestamp": pullback_ts,
