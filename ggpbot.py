@@ -11573,73 +11573,103 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                     last_seen[symbol_key] = candle_ts
                     _observed_at = time.time()
                     _proximity_frame_seconds = float(timeframe_seconds)
-                    _proximity_cross_event = bool(proximity.get("cross_ema9") or proximity.get("cross_ema50"))
-                    _proximity_cross_age = (
-                        max(0.0, _observed_at - (float(proximity.get("candle_timestamp") or 0) / 1000.0
-                                                 + _proximity_frame_seconds))
-                        if _proximity_cross_event else None
-                    )
-                    _proximity_cross_max_age = 2.0 * _proximity_frame_seconds
-                    # The crossover watchlist and execution gateway now share
-                    # one adaptive EMA9/Session-VWAP decision: direct, micro-pullback,
-                    # retest, or explicit wait/no-chase. This remains watchlist-only.
+                    _proximity_cross_event = False
+                    _proximity_cross_age = None
+                    _proximity_cross_max_age = 6.0 * _proximity_frame_seconds
+                    # This scanner now follows the same EMA9/EMA15/VWAP
+                    # cross -> pullback -> separate rejection -> later break
+                    # lifecycle as the final execution gate. It remains discovery-only.
                     _adaptive_checks = {}
                     _watch_price = float(closed["close"].iloc[-1])
                     _watch_ob = analysis.get("order_block") if isinstance(analysis.get("order_block"), dict) else {}
                     _watch_zone_low = analysis.get("entry_zone_low", _watch_ob.get("low"))
                     _watch_zone_high = analysis.get("entry_zone_high", _watch_ob.get("high"))
+                    _watch_zone_timestamp = analysis.get("adaptive_entry_location_timestamp")
+                    _analysis_side = str(analysis.get("side") or "").upper()
                     for _watch_side in ("BUY", "SELL"):
                         try:
-                            _check = _validate_adaptive_ema9_vwap_entry_gate(
+                            _side_zone_low = _watch_zone_low if _analysis_side == _watch_side else None
+                            _side_zone_high = _watch_zone_high if _analysis_side == _watch_side else None
+                            _side_zone_timestamp = _watch_zone_timestamp if _analysis_side == _watch_side else None
+                            _check = _validate_ema915_vwap_pullback_entry_gate(
                                 closed, _watch_side, ema,
                                 timeframe_seconds=int(_proximity_frame_seconds),
-                                now_ms=now_ms, lookback_candles=5, current_price=_watch_price,
-                                entry_zone_low=_watch_zone_low, entry_zone_high=_watch_zone_high,
-                                max_chase_atr=1.5,
+                                now_ms=now_ms, cross_lookback_candles=8,
+                                pullback_lookback_candles=5, current_price=_watch_price,
+                                max_extension_atr=1.5, setup_mode="CONTINUATION",
+                                entry_zone_low=_side_zone_low, entry_zone_high=_side_zone_high,
+                                entry_zone_available_timestamp=_side_zone_timestamp,
                             )
                         except Exception as _check_exc:
                             _check = {"ready": False, "side": _watch_side, "entry_mode": "INVALIDATED",
                                       "reason": f"gate_error:{type(_check_exc).__name__}"}
                         _reason = str(_check.get("reason") or "unknown")
+                        _expected_cross = "BULLISH" if _watch_side == "BUY" else "BEARISH"
+                        _cross_matches_side = str(_check.get("cross_direction") or "").upper() == _expected_cross
+                        _cross_ts = _check.get("cross_timestamp")
+                        _cross_age_bars = (
+                            max(0, int((int(closed.timestamp.iloc[-1]) - int(_cross_ts)) / (int(_proximity_frame_seconds) * 1000)))
+                            if _cross_ts is not None else None
+                        )
+                        _check["cross_age_bars"] = _cross_age_bars
+                        _check["ema9_cross"] = _check.get("cross_direction")
+                        _check["cross_fresh"] = bool(
+                            _cross_matches_side and _cross_age_bars is not None and _cross_age_bars <= 6
+                        )
                         _stage_map = {
-                            "fresh_cross_direct_location_confirmed": "DIRECT_ENTRY",
-                            "micro_pullback_touch_and_reclaim_confirmed": "MICRO_PULLBACK_READY",
-                            "breakout_retest_reclaim_confirmed": "RETEST_READY",
-                            "waiting_for_micro_pullback": "WAITING_FOR_MICRO_PULLBACK",
-                            "waiting_for_structural_retest": "WAITING_FOR_RETEST",
-                            "waiting_for_live_vwap_reclaim": "WAITING_FOR_VWAP_RECLAIM",
+                            "waiting_for_post_cross_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_ema_band_or_macro_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_directional_rejection": "WAITING_FOR_REJECTION",
+                            "waiting_for_continuation_break": "WAITING_FOR_CONTINUATION_BREAK",
+                            "false_breakout_close_back_inside": "INVALIDATED",
                             "entry_window_missed_no_chase": "ENTRY_WINDOW_MISSED",
                             "cross_window_expired": "CROSS_EXPIRED",
-                            "missing_fresh_directional_ema9_vwap_cross": "NO_FRESH_CROSS",
-                            "latest_closed_ema9_vwap_relationship_not_directional": "WAITING_FOR_ALIGNMENT",
+                            "pullback_window_expired": "CROSS_EXPIRED",
+                            "missing_fresh_ema9_ema15_cross": "NO_FRESH_CROSS",
+                            "ema9_ema15_cross_direction_mismatch": "CROSS_DIRECTION_MISMATCH",
+                            "ema915_or_vwap_direction_not_aligned": "WAITING_FOR_RECLAIM",
+                            "ema915_vwap_or_macro_trend_not_aligned": "WAITING_FOR_ALIGNMENT",
                             "stale_closed_candle_data": "STALE_DATA",
+                            "excessive_ema915_whipsaw": "CHOP_FILTER",
+                            "excessive_vwap_whipsaw": "CHOP_FILTER",
                         }
-                        _check["stage"] = (_stage_map.get(_reason, "ENTRY_READY" if _check.get("ready") else "WAITING"))
+                        if _check.get("ready") is True:
+                            _check["stage"] = "MACRO_PULLBACK_READY" if _check.get("entry_mode") == "MACRO_PULLBACK" else "MICRO_PULLBACK_READY"
+                        else:
+                            _check["stage"] = _stage_map.get(_reason, "WAITING" if _check.get("cross_fresh") else "NO_FRESH_CROSS")
                         _check["setup_progress_pct"] = {
-                            "DIRECT_ENTRY": 100, "MICRO_PULLBACK_READY": 100, "RETEST_READY": 100,
-                            "WAITING_FOR_RETEST": 65, "WAITING_FOR_MICRO_PULLBACK": 45,
-                            "WAITING_FOR_VWAP_RECLAIM": 25, "ENTRY_WINDOW_MISSED": 0,
-                            "CROSS_EXPIRED": 0, "NO_FRESH_CROSS": 0, "STALE_DATA": 0,
+                            "MICRO_PULLBACK_READY": 100, "MACRO_PULLBACK_READY": 100,
+                            "WAITING_FOR_CONTINUATION_BREAK": 80, "WAITING_FOR_REJECTION": 60,
+                            "WAITING_FOR_PULLBACK": 35, "WAITING_FOR_RECLAIM": 25,
+                            "ENTRY_WINDOW_MISSED": 0, "INVALIDATED": 0,
+                            "CROSS_EXPIRED": 0, "CROSS_DIRECTION_MISMATCH": 0,
+                            "NO_FRESH_CROSS": 0, "STALE_DATA": 0, "CHOP_FILTER": 0,
                         }.get(_check["stage"], 15)
                         _check["setup_progress_basis"] = "RULE_STAGE_COMPLETION_NOT_WIN_PROBABILITY"
                         _adaptive_checks[_watch_side] = _check
                     _ready_sides = [s for s, v in _adaptive_checks.items() if v.get("ready")]
                     _active_side = _ready_sides[0] if _ready_sides else None
                     if _active_side is None:
-                        for _side_name, _side_check in _adaptive_checks.items():
-                            _cross = str(_side_check.get("ema9_cross") or "").upper()
-                            if _cross == ("BULLISH" if _side_name == "BUY" else "BEARISH"):
-                                _active_side = _side_name
-                                break
-                    if _active_side is None:
-                        _active_side = "BUY" if proximity.get("cross_any") == "BULLISH" else "SELL" if proximity.get("cross_any") == "BEARISH" else None
+                        _fresh_sides = [
+                            s for s, v in _adaptive_checks.items()
+                            if v.get("cross_fresh") is True
+                        ]
+                        _active_side = _fresh_sides[0] if _fresh_sides else None
+                    _active_check_candidate = _adaptive_checks.get(_active_side, {}) if _active_side else {}
+                    _cross_ts_for_age = _active_check_candidate.get("cross_timestamp")
+                    if _cross_ts_for_age is not None:
+                        _proximity_cross_event = True
+                        _proximity_cross_age = max(
+                            0.0, _observed_at - (float(_cross_ts_for_age) / 1000.0 + _proximity_frame_seconds)
+                        )
                     _active_check = _adaptive_checks.get(_active_side, {}) if _active_side else {}
                     _strategy_snapshot = {
-                        "trigger": "EMA9_SESSION_VWAP_ADAPTIVE",
+                        "trigger": "EMA9_EMA15_SESSION_VWAP_PULLBACK",
                         "active_side": _active_side or "NONE",
                         "stage": _active_check.get("stage", "NO_FRESH_CROSS"),
                         "reason": _active_check.get("reason", "no_directional_setup"),
                         "entry_ready": bool(_active_check.get("ready")),
+                        "cross_fresh": bool(_active_check.get("cross_fresh")),
                         "buy": _adaptive_checks["BUY"],
                         "sell": _adaptive_checks["SELL"],
                         "observed_price": _watch_price,
@@ -11656,7 +11686,9 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                         "timeframe_seconds": _proximity_frame_seconds,
                         "cross_age_seconds": _proximity_cross_age,
                         "cross_max_age_seconds": _proximity_cross_max_age,
-                        "cross_fresh": bool(_proximity_cross_event and _proximity_cross_age <= _proximity_cross_max_age),
+                        "cross_fresh": bool(_active_check.get("cross_fresh") and _proximity_cross_event
+                                            and _proximity_cross_age is not None
+                                            and _proximity_cross_age <= _proximity_cross_max_age),
                         "data_quality": "CLOSED_CANDLES",
                         "role": "RANKING_ONLY_NOT_ENTRY_GATE",
                     }
