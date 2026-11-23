@@ -963,11 +963,11 @@ def validate_ema915_vwap_pullback_entry_gate(
     })
     scan_start = max(cross_idx + 1, len(closed) - 1 - pullback_window)
 
-    # Macro/deep pullback: require the validated OB/FVG/SR zone supplied by the
-    # institutional bridge, confluence with EMA50, and protection of the last
-    # confirmed pre-cross swing. EMA50 touch alone never grants an entry.
-    if (macro_trend_aligned and macro_zone_low is not None and ema50 is not None
-            and zone_available_ts is not None):
+    # Retests use a validated OB/FVG/confirmed-SR zone that was knowable before
+    # the touch and a protected pre-cross swing. Macro Pullback is the deeper
+    # subtype: the same retest must also intersect EMA50 and retrace >= 0.75 ATR.
+    retest_candidate = None
+    if macro_zone_low is not None and zone_available_ts is not None:
         prior_start = max(0, cross_idx - 30)
         prior = closed.iloc[prior_start:cross_idx]
         protected_swing = None
@@ -988,33 +988,46 @@ def validate_ema915_vwap_pullback_entry_gate(
             for idx in range(scan_start, len(closed) - 1):
                 candle = closed.iloc[idx]
                 if int(candle.timestamp) <= zone_available_ts:
-                    continue  # the zone must be knowable before the historical retest candle
+                    continue  # zone must exist before the retest candle
                 candle_low, candle_high = float(candle.low), float(candle.high)
                 candle_close = float(candle.close)
-                ema50_i = float(ema50.iloc[idx])
                 zone_touch = (
                     candle_low <= macro_zone_high + 0.10 * atr
                     and candle_high >= macro_zone_low - 0.10 * atr
                 )
+                if not zone_touch:
+                    continue
                 if direction == "BUY":
-                    ema50_touch = (
-                        candle_low <= ema50_i + 0.30 * atr
-                        and candle_low >= ema50_i - 0.60 * atr
-                        and candle_close >= ema50_i - 0.15 * atr
-                    )
                     structure_protected = candle_low > protected_swing - 0.10 * atr
                     impulse_extreme = float(closed.high.iloc[cross_idx:idx+1].max())
                     depth_atr = (impulse_extreme - candle_low) / atr
+                    ema50_touch = False
+                    ema50_i = None
+                    if ema50 is not None:
+                        ema50_i = float(ema50.iloc[idx])
+                        ema50_touch = (
+                            candle_low <= ema50_i + 0.30 * atr
+                            and candle_low >= ema50_i - 0.60 * atr
+                            and candle_close >= ema50_i - 0.15 * atr
+                        )
                 else:
-                    ema50_touch = (
-                        candle_high >= ema50_i - 0.30 * atr
-                        and candle_high <= ema50_i + 0.60 * atr
-                        and candle_close <= ema50_i + 0.15 * atr
-                    )
                     structure_protected = candle_high < protected_swing + 0.10 * atr
                     impulse_extreme = float(closed.low.iloc[cross_idx:idx+1].min())
                     depth_atr = (candle_high - impulse_extreme) / atr
-                if zone_touch and ema50_touch and structure_protected and depth_atr >= 0.75:
+                    ema50_touch = False
+                    ema50_i = None
+                    if ema50 is not None:
+                        ema50_i = float(ema50.iloc[idx])
+                        ema50_touch = (
+                            candle_high >= ema50_i - 0.30 * atr
+                            and candle_high <= ema50_i + 0.60 * atr
+                            and candle_close <= ema50_i + 0.15 * atr
+                        )
+                if not structure_protected or depth_atr < 0.25:
+                    continue
+                if retest_candidate is None:
+                    retest_candidate = (idx, depth_atr, protected_swing, ema50_i)
+                if macro_trend_aligned and ema50_touch and depth_atr >= 0.75:
                     pullback_idx = idx
                     pullback_type = "MACRO_PULLBACK"
                     result.update({
@@ -1023,7 +1036,14 @@ def validate_ema915_vwap_pullback_entry_gate(
                         "protected_swing_level": float(protected_swing),
                     })
                     break
-
+            if pullback_idx is None and retest_candidate is not None:
+                pullback_idx, retest_depth, protected_swing, retest_ema50 = retest_candidate
+                pullback_type = "RETEST"
+                result.update({
+                    "macro_pullback_depth_atr": float(retest_depth),
+                    "protected_swing_level": float(protected_swing),
+                    "macro_ema50": retest_ema50,
+                })
     # If no deeper EMA50/causal-zone pullback qualifies, evaluate the fast
     # EMA9/EMA15 band for a shallower micro-pullback.
     if pullback_idx is None:
