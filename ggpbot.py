@@ -61,6 +61,7 @@ except Exception as _env_exc:
     print(f"[ENV] configuration loader unavailable: {type(_env_exc).__name__}; process environment only")
 
 from ggp_runtime_config import resolve_trading_mode
+from ggp_api_coalescer import KeyedSingleFlight
 from ggp_management_events import TradeManagementEventLog
 from ggp_telegram import TelegramNotifier
 from ggp_position_sizing import (
@@ -1118,29 +1119,33 @@ def get_ohlcv_safe(symbol, limit=120, htf=False):
     return get_ohlcv_safe_meta(symbol, limit, htf=htf)[0]
 
 
-def get_ohlcv_safe_meta(symbol, limit=120, htf=False):
-    """Return (frame, source). `source` is CACHE_HIT or FRESH_REQUEST (or NONE).
+# Bounded striped locks coalesce concurrent OHLCV cache misses without
+# changing BingX endpoint pacing or the existing cache/freshness policy.
+_OHLCV_SINGLEFLIGHT = KeyedSingleFlight(stripes=64)
 
-    A CACHE_HIT means the frame was served from the local cache without any new
-    BingX request; it must never be logged as a new exchange request.
-    """
-    # Increase TTL during open trade to reduce API calls
+
+def get_ohlcv_safe_meta(symbol, limit=120, htf=False):
+    """Return (frame, source), coalescing concurrent misses for the same key."""
+    # Increase TTL during open trade to reduce API calls.
     ttl = 10 if (STATE.get("open") or TRADE_STATE["in_position"]) else 30
     if htf:
         ttl = max(ttl, 30)
     cache_key = f"ohlcv_{symbol}_{INTERVAL}_{limit}_htf" if htf else f"ohlcv_{symbol}_{INTERVAL}_{limit}"
-    cached = cache_get(cache_key, ttl)
-    if cached is not None:
-        if len(cached) >= 100:
-            return cached, "CACHE_HIT"
-    if htf:
-        df = fetch_ohlcv_htf(symbol, '1h', limit)
-    else:
-        df = fetch_ohlcv(symbol, limit)
-    if df is not None and validate_dataframe(df, min(limit, 100)):
-        cache_set(cache_key, df)
-        return df, "FRESH_REQUEST"
-    return None, "NONE"
+
+    def _read_cache():
+        cached = cache_get(cache_key, ttl)
+        return cached if cached is not None and len(cached) >= 100 else None
+
+    def _fetch():
+        return fetch_ohlcv_htf(symbol, '1h', limit) if htf else fetch_ohlcv(symbol, limit)
+
+    return _OHLCV_SINGLEFLIGHT.get_or_fetch(
+        cache_key,
+        get_cached=_read_cache,
+        fetch=_fetch,
+        is_valid=lambda frame: frame is not None and validate_dataframe(frame, min(limit, 100)),
+        set_cached=lambda frame: cache_set(cache_key, frame),
+    )
 
 def get_ticker_safe(symbol):
     # Use short TTL for live price
