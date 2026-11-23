@@ -220,7 +220,7 @@ def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypa
         entry_zone_low=101.8, entry_zone_high=102.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
-    assert result["ready"] is True
+    assert result["ready"] is True, result
     assert result["entry_mode"] == "IMPULSE_ENTRY"
     assert result["authorization_state"] == "EMA915_VWAP_IMPULSE_VALID"
     assert result["bos_confirmed"] is True
@@ -235,10 +235,11 @@ def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypa
         entry_zone_low=97.8, entry_zone_high=98.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
-    assert result["ready"] is True
+    assert result["ready"] is True, result
     assert result["entry_mode"] == "IMPULSE_ENTRY"
     assert result["authorization_state"] == "EMA915_VWAP_IMPULSE_VALID"
     assert result["bos_confirmed"] is True
+
 
 
 def test_impulse_requires_all_three_quality_confirmations_and_bos():
