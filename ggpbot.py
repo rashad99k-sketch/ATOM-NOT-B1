@@ -6723,8 +6723,15 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         gate_result = {"ready": False, "reason": f"gate_error:{type(gate_exc).__name__}"}
     raw_signal_id = str(gate_result.get("signal_candle_id") or "").strip()
     if gate_result.get("ready") and gate_event_id and raw_signal_id:
-        expected_context_signal_id = ":".join(str(gate_event_id).split(":")[-4:])
-        if expected_context_signal_id != raw_signal_id:
+        event_parts = str(gate_event_id).split(":")
+        context_suffix = event_parts[-4:]
+        # Bridge-issued event IDs carry the four closed-candle timestamps.
+        # Legacy/non-bridge callers may carry a different ID shape; they still
+        # use the same gate, while their durable execution ID is canonicalized below.
+        standard_context_event = len(event_parts) >= 6 and len(context_suffix) == 4 and all(
+            part.isdigit() for part in context_suffix
+        )
+        if standard_context_event and ":".join(context_suffix) != raw_signal_id:
             gate_result.update({
                 "ready": False, "decision_state": "INVALIDATED",
                 "reason": "entry_context_event_identity_mismatch",

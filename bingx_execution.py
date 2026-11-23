@@ -453,7 +453,11 @@ class TradeExecutionService:
                 trade_id, exchange_order_id=order_id, filled_qty=filled,
                 remaining_qty=remaining, average_fill_price=average,
                 actual_entry_price=average, status=state.value,
-                recovery_status=("EXECUTION_UNCERTAIN" if state is ExecutionState.EXECUTION_UNCERTAIN else ""),
+                recovery_status=(
+                    "PARTIAL_FILL_RECOVERY_HOLD" if state is ExecutionState.PARTIAL_FILL
+                    else "EXECUTION_UNCERTAIN" if state is ExecutionState.EXECUTION_UNCERTAIN
+                    else ""
+                ),
             )
         return result
 
