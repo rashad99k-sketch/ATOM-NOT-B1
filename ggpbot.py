@@ -6863,6 +6863,11 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
                 f"for {entry_event_id}: {type(event_exc).__name__}: {event_exc}", "ERROR",
             )
             return False
+    # Mark authorization only after the central closed-candle gate and durable
+    # duplicate-event checks have both passed. Every caller (scanner or manual)
+    # reaches this same gateway before sizing or exchange submission.
+    institutional_entry_ctx["entry_authorized"] = True
+    institutional_entry_ctx["entry_authority"] = "UNIFIED_EMA915_SESSION_VWAP"
     log_execution(
         f"[EMA915_VWAP_ENTRY_GATE] PASSED {symbol} {side} "
         f"mode={gate_result.get('entry_mode')} cross_ts={gate_result.get('cross_timestamp')} "
@@ -12267,8 +12272,11 @@ def smart_opportunity_selection():
         return False
 
     watchlist = MEMORY.get("watchlist", {})
+    # Candidate discovery and institutional diagnostics are not entry authority.
+    # Only the explicit EMA/VWAP lifecycle projection may enter final revalidation.
     ready = [(sym, item) for sym, item in watchlist.items()
-             if isinstance(item, dict) and item.get("decision_state") == "ENTRY_READY"]
+             if isinstance(item, dict) and item.get("strategy_ready") is True
+             and item.get("strategy_state") == "ENTRY_READY"]
     def _location_first_rank(pair):
         _, candidate = pair
         side_value = str(candidate.get("side") or "").upper()
@@ -12354,7 +12362,9 @@ def smart_opportunity_selection():
                 return False
             item.update(fresh)
             item["source"] = item.get("source") or "unified_watchlist"
-            if item.get("decision_state") != "ENTRY_READY":
+            # Revalidation reads the strategy projection, not an institutional
+            # engine's state. Institutional output remains location/liquidity context.
+            if item.get("strategy_ready") is not True or item.get("strategy_state") != "ENTRY_READY":
                 continue
             side = str(item.get("side", "")).upper()
             if side not in ("BUY", "SELL"):
@@ -12455,6 +12465,9 @@ def smart_opportunity_selection():
                 "entry_zone_available_timestamp": item.get("adaptive_entry_location_timestamp"),
                 "support_resistance": dict(item.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
                 "location_context": dict(location_context),
+                "institutional_location_context": dict(item.get("institutional_location_context") or {}),
+                "strategy_state": item.get("strategy_state"),
+                "strategy_ready": item.get("strategy_ready") is True,
                 "order_block": dict(item.get("order_block") or {}),
                 "fvg": dict(item.get("fvg") or {}),
                 "liquidity": dict(item.get("liquidity") or {}),
