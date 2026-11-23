@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ggp_institutional_bridge import canonical_symbol, merge_candidates, analyze_symbol, update_unified_watchlist
+from ggp_institutional_bridge import canonical_symbol, merge_candidates, analyze_symbol, update_unified_watchlist, _strategy_authority_fields
 
 
 def frame(n=80):
@@ -222,3 +222,40 @@ def test_stale_or_non_directional_ema915_scanner_rows_are_not_candidates():
         ]
     })
     assert merged == {}
+
+
+
+def test_strategy_authority_projection_is_separate_and_fail_closed():
+    ready = _strategy_authority_fields({
+        "ready": True,
+        "decision_state": "ENTRY_READY",
+        "location_status": "CLEAR",
+    })
+    assert ready == {
+        "strategy_state": "ENTRY_READY",
+        "strategy_ready": True,
+        "entry_authorized": False,
+    }
+
+    waiting = _strategy_authority_fields({
+        "ready": False,
+        "decision_state": "WAITING_FOR_PULLBACK",
+        "location_status": "UNKNOWN",
+    })
+    assert waiting["strategy_state"] == "WAITING_FOR_PULLBACK"
+    assert waiting["strategy_ready"] is False
+    assert waiting["entry_authorized"] is False
+
+
+def test_strategy_authority_projection_does_not_promote_institutional_state():
+    # Institutional diagnostics may be strong or weak; only the closed-bar
+    # EMA/VWAP gate's own result can mark the strategy lifecycle ready.
+    gate = {"ready": False, "decision_state": "WAITING_FOR_CONFIRMATION"}
+    strong_institutional_context = {
+        "decision_state": "ENTRY_READY",
+        "liquidity": {"confidence": 99},
+        "order_block": {"valid": True, "strength": 10},
+    }
+    projected = _strategy_authority_fields(gate)
+    assert strong_institutional_context["decision_state"] == "ENTRY_READY"
+    assert projected["strategy_ready"] is False
