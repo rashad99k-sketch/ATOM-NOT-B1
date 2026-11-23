@@ -6634,14 +6634,29 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         if gate_frame is None:
             gate_frame = _integration_fetch_frame(symbol)
             gate_frame_source = "SHARED_SCANNER_FRAME_FALLBACK"
-        gate_result = _validate_adaptive_ema9_vwap_entry_gate(
-            gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
-            now_ms=int(time.time() * 1000), lookback_candles=5,
-            current_price=float(price),
-            entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
-            entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
-            max_chase_atr=1.5,
-        )
+        if gate_setup_type == "EMA9_VWAP_ADAPTIVE":
+            gate_result = _validate_ema915_vwap_pullback_entry_gate(
+                gate_frame, side, ema,
+                timeframe_seconds=_roro_timeframe_seconds(gate_tf),
+                now_ms=int(time.time() * 1000),
+                cross_lookback_candles=8, pullback_lookback_candles=5,
+                current_price=float(price), max_extension_atr=1.5,
+                setup_mode="CONTINUATION",
+                entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
+                entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
+                entry_zone_available_timestamp=institutional_entry_ctx.get("entry_zone_available_timestamp"),
+            )
+            gate_result["gate_kind"] = "EMA915_PULLBACK"
+        else:
+            gate_result = _validate_adaptive_ema9_vwap_entry_gate(
+                gate_frame, side, ema, timeframe_seconds=_roro_timeframe_seconds(gate_tf),
+                now_ms=int(time.time() * 1000), lookback_candles=5,
+                current_price=float(price),
+                entry_zone_low=institutional_entry_ctx.get("entry_zone_low"),
+                entry_zone_high=institutional_entry_ctx.get("entry_zone_high"),
+                max_chase_atr=1.5,
+            )
+            gate_result["gate_kind"] = "ADAPTIVE_EMA9_VWAP"
         gate_result["setup_mode"] = gate_setup_mode
         gate_result["frame_source"] = gate_frame_source
     except Exception as gate_exc:
@@ -6664,7 +6679,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             f"VWAP={gate_result.get('vwap')} EMA50={gate_result.get('ema50')} "
             f"EMA50_alignment={gate_result.get('ema50_alignment')} "
             f"source={gate_result.get('frame_source', gate_frame_source)} "
-            f"cross={gate_result.get('ema9_cross')} cross_ts={gate_result.get('cross_timestamp')} "
+            f"cross={gate_result.get('ema9_cross') or gate_result.get('cross_direction')} cross_ts={gate_result.get('cross_timestamp')} "
             f"zone={gate_result.get('entry_zone_low')}-{gate_result.get('entry_zone_high')} "
             f"closed_ts={gate_result.get('latest_closed_timestamp')} "
             f"data_age_sec={gate_result.get('data_age_seconds')}",
@@ -6921,8 +6936,12 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
             elif setup == "EMA9_VWAP_ADAPTIVE":
                 valid = bool(
                     gate_result.get("ready") is True
-                    and gate_result.get("entry_mode") in {"DIRECT_ENTRY", "MICRO_PULLBACK", "RETEST_ENTRY"}
-                    and any(ev == "ema9_vwap_cross_confirmed" for ev in evidence)
+                    and gate_result.get("gate_kind") == "EMA915_PULLBACK"
+                    and gate_result.get("authorization_state") in {
+                        "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_MACRO_PULLBACK_VALID"
+                    }
+                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "MACRO_PULLBACK"}
+                    and any(ev == "ema9_ema15_cross_confirmed" for ev in evidence)
                     and any(ev.startswith("causal_zone:") for ev in evidence)
                     and any(ev.startswith("structure_confirmation:") or ev.startswith("liquidity_confirmation:") for ev in evidence)
                 )
@@ -7126,6 +7145,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "entry_time": time.time(), "tp1_hit": False, "tp2_hit": False,
         "trail_activated": False, "be_done": False,
         "entry_gate_snapshot": dict(gate_result),
+        "entry_gate_kind": gate_result.get("gate_kind", "ADAPTIVE_EMA9_VWAP"),
         "entry_gate_timeframe": gate_tf,
         "entry_gate_setup_mode": gate_setup_mode,
         "entry_gate_evidence": list(gate_evidence),
@@ -7133,6 +7153,7 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         "entry_gate_origin_timestamp": gate_origin_timestamp,
         "entry_zone_low": gate_result.get("entry_zone_low"),
         "entry_zone_high": gate_result.get("entry_zone_high"),
+        "entry_zone_available_timestamp": institutional_entry_ctx.get("entry_zone_available_timestamp"),
     }
     if daily_loss_cooldown_active():
         log_execution(f"[ENTRY_BLOCKED] cooldown activated during validation; order not submitted for {symbol}", "WARN")
@@ -8937,7 +8958,11 @@ def scaling_logic(symbol, df, ind):
             "sl": STATE.get("synthetic_sl", STATE.get("sl")),
             "native_sl_original_price": STATE.get("native_sl_original_price", STATE.get("sl")),
             "tp1_price": STATE.get("tp1_price"), "tp2_price": STATE.get("tp2_price"),
-            "entry_gate_snapshot": dict(scale_gate), "entry_gate_timeframe": INTERVAL,
+            "entry_gate_snapshot": dict(scale_gate), "entry_gate_kind": "EMA915_PULLBACK",
+            "entry_gate_timeframe": INTERVAL,
+            "entry_zone_low": scale_gate.get("entry_zone_low"),
+            "entry_zone_high": scale_gate.get("entry_zone_high"),
+            "entry_zone_available_timestamp": scale_gate.get("entry_zone_available_timestamp"),
         }
         order = open_position(
             STATE["side"], qty, symbol,
@@ -11969,6 +11994,7 @@ def smart_opportunity_selection():
                 "entry_behavior": str(item.get("entry_behavior") or market_intelligence.get("entry_behavior") or "WAIT_FOR_STRUCTURE"),
                 "entry_zone_low": safe_float(item.get("entry_zone_low", market_intelligence.get("reference_low")), 0.0),
                 "entry_zone_high": safe_float(item.get("entry_zone_high", market_intelligence.get("reference_high")), 0.0),
+                "entry_zone_available_timestamp": item.get("adaptive_entry_location_timestamp"),
                 "support_resistance": dict(item.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
                 "order_block": dict(item.get("order_block") or {}),
                 "fvg": dict(item.get("fvg") or {}),
