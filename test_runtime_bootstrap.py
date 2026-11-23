@@ -40,6 +40,18 @@ def test_runtime_bootstrap_fails_closed_when_lock_is_owned(tmp_path):
     assert started == []
 
 
+def test_runtime_bootstrap_records_lock_acquisition_error(tmp_path):
+    state = {}
+    bootstrap = RuntimeBootstrap(
+        lock_factory=lambda path: (_ for _ in ()).throw(PermissionError("lock path unavailable"))
+    )
+
+    assert bootstrap.start(lambda: None, state, str(tmp_path / "runtime.lock")) is False
+    assert state["status"] == "FAILED"
+    assert state["thread_alive"] is False
+    assert "RUNTIME_LOCK_ACQUISITION_FAILED:PermissionError" in state["last_error"]
+
+
 def test_runtime_bootstrap_records_supervisor_exception(tmp_path):
     state = {}
     bootstrap = RuntimeBootstrap(lock_factory=lambda path: object())
