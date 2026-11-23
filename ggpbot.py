@@ -7008,17 +7008,22 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
                 has_trigger = any("post_retest_trigger" in ev for ev in evidence)
                 valid = has_bos and has_displacement and has_retest and has_trigger
             elif setup == "EMA9_VWAP_ADAPTIVE":
+                expected_cross = "BULLISH" if side == "BUY" else "BEARISH"
                 valid = bool(
                     gate_result.get("ready") is True
-                    and gate_result.get("gate_kind") == "EMA915_PULLBACK"
-                    and gate_result.get("authorization_state") in {
-                        "EMA915_VWAP_PULLBACK_VALID", "EMA915_VWAP_RETEST_VALID",
-                        "EMA915_VWAP_MACRO_PULLBACK_VALID"
+                    and gate_result.get("gate_kind") == "EMA915_VWAP_LOCATION_FIRST"
+                    and gate_result.get("decision_state") == "ENTRY_READY"
+                    and gate_result.get("cross_direction") == expected_cross
+                    and gate_result.get("pullback_touch") is True
+                    and gate_result.get("rejection_confirmed") is True
+                    and gate_result.get("continuation_break") is True
+                    and gate_result.get("entry_mode") in {
+                        "PULLBACK_RETEST_REJECTION_BREAK",
+                        "MACRO_PULLBACK_REJECTION_BREAK",
                     }
-                    and gate_result.get("entry_mode") in {"MICRO_PULLBACK", "RETEST", "MACRO_PULLBACK"}
-                    and any(ev == "ema9_ema15_cross_confirmed" for ev in evidence)
-                    and any(ev.startswith("causal_zone:") for ev in evidence)
-                    and any(ev.startswith("structure_confirmation:") or ev.startswith("liquidity_confirmation:") for ev in evidence)
+                    and gate_result.get("location_status") in {
+                        "CLEAR", "UNKNOWN_NON_BLOCKING",
+                    }
                 )
             else:
                 valid = False
@@ -7026,7 +7031,11 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
                 log_execution(f"[ENTRY] Institutional authorization incomplete for {setup}; LIVE blocked", "ERROR")
                 return False
             # ADX, EMA and VWAP remain contextual evidence. They are not universal entry gates.
-            log_execution(f"[ENTRY] Institutional setup authorized: {setup}; ADX={adx_val:.1f} treated as context, not a hard cross gate", "INFO")
+            log_execution(
+                f"[ENTRY] Setup authorized: {setup}; EMA9/EMA15 + VWAP is primary, "
+                f"institutional analysis is location-only; ADX={adx_val:.1f} is context",
+                "INFO",
+            )
         else:
             # Legacy/manual entry path keeps its existing stricter safeguards.
             if not (25 <= adx_val <= 38):
