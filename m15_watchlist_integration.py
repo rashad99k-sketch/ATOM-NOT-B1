@@ -52,7 +52,8 @@ def _update_radar_meta(memory: Dict[str, Any], *, now_ms: int, symbol: str,
     rows = [item for item in memory.get("m15_crossover_radar", []) if isinstance(item, dict)]
     meta = memory.setdefault("m15_crossover_radar_meta", {})
     meta.update({
-        "state": "PARTIAL_DATA" if data_unavailable else "ACTIVE" if rows else "NO_CANDIDATES",
+        "state": ("DATA_UNAVAILABLE" if data_unavailable and not rows else
+                  "PARTIAL_DATA" if data_unavailable else "ACTIVE" if rows else "NO_CANDIDATES"),
         "timeframe": "15m",
         "source": "SCANNER_2_SHARED_CLOSED_FRAME",
         "closed_candles_only": True,
@@ -101,7 +102,7 @@ def process_m15_watchlist_frame(
         prior_row = rows.get(key)
         if last_seen.get(key) == candle_ts and isinstance(prior_row, dict):
             candle_age_ms = now_ms - (candle_ts + 900_000)
-            if candle_age_ms <= 1_800_000 or not prior_row.get("lifecycle_active"):
+            if candle_age_ms <= 1_800_000:
                 _update_radar_meta(memory, now_ms=now_ms, symbol=key)
                 return copy.deepcopy(prior_row)
             stale_row = dict(prior_row)
@@ -109,7 +110,8 @@ def process_m15_watchlist_frame(
                 "crossover_status": "EXPIRED", "opportunity_state": "EXPIRED",
                 "rejection_reason": "STALE_CLOSED_CANDLE_DATA", "last_update_ms": now_ms,
             })
-            stale_row = advance_m15_setup_lifecycle(stale_row, now_ms=now_ms, cycle_id=candle_ts)
+            if prior_row.get("lifecycle_active"):
+                stale_row = advance_m15_setup_lifecycle(stale_row, now_ms=now_ms, cycle_id=candle_ts)
             rows[key] = copy.deepcopy(stale_row)
             watch_item = memory.setdefault("watchlist", {}).setdefault(key, {"symbol": key})
             watch_item.pop("m15_setup", None)
@@ -118,7 +120,8 @@ def process_m15_watchlist_frame(
                 item for item in memory.get("m15_crossover_radar", [])
                 if not isinstance(item, dict) or _canonical(item.get("symbol")) != key
             ][:_MAX_RADAR_ROWS]
-            _update_radar_meta(memory, now_ms=now_ms, symbol=key)
+            _update_radar_meta(memory, now_ms=now_ms, symbol=key, data_unavailable=True,
+                               reason="STALE_CLOSED_CANDLE_DATA")
             return copy.deepcopy(stale_row)
 
         row = evaluate_m15_radar(key, closed_frame, now_ms=now_ms)
