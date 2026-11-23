@@ -139,7 +139,8 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     cross_age_bars = (len(closed) - 1 - recent_cross_idx) if recent_cross_idx is not None else None
     signal_timestamp = int(closed["timestamp"].iloc[recent_cross_idx]) if recent_cross_idx is not None else None
     signal_price = _finite(close.iloc[recent_cross_idx]) if recent_cross_idx is not None else None
-    closed_age = max(0, now_ms - (signal_timestamp + 900_000))
+    latest_closed_timestamp = int(closed["timestamp"].iloc[-1])
+    closed_age = max(0, now_ms - (latest_closed_timestamp + 900_000))
     if closed_age > int(max_closed_age_ms):
         expired = _empty(symbol, "STALE_CLOSED_CANDLE_DATA", now_ms)
         expired.update({"crossover_status": "EXPIRED", "opportunity_state": "EXPIRED"})
@@ -149,7 +150,7 @@ def evaluate_m15_radar(symbol: str, raw_frame: Any, *, now_ms: Optional[int] = N
     latest_price = _finite(last_raw["close"])
     raw_is_forming = int(last_raw["timestamp"]) + 900_000 > now_ms
     intrabar_side = None
-    if raw_is_forming and int(last_raw["timestamp"]) > signal_timestamp:
+    if raw_is_forming and int(last_raw["timestamp"]) > latest_closed_timestamp:
         live_close = pd.concat([close, pd.Series([float(last_raw["close"])])], ignore_index=True)
         live_ema9 = live_close.ewm(span=9, adjust=False).mean()
         live_ema15 = live_close.ewm(span=15, adjust=False).mean()
