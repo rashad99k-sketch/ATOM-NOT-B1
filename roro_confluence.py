@@ -2165,11 +2165,17 @@ def validate_ema915_vwap_location_first_entry_gate(
                        "decision_state": "INVALIDATED"})
         return result
     extension = abs(live - e9_now) / atr
-    directional_extension = max(0.0, (live - e9_now) / atr if direction == "BUY" else (e9_now - live) / atr)
-    result.update({"live_price": live, "ema9_extension_atr": extension,
-                   "trend_extension_atr": directional_extension,
-                   "max_extension_atr": float(max_extension_atr)})
-    if directional_extension > float(max_extension_atr):
+    ema_directional_extension = max(0.0, (live - e9_now) / atr if direction == "BUY" else (e9_now - live) / atr)
+    cross_price = float(close.iloc[cross_idx])
+    trend_extension = max(0.0, (live - cross_price) / atr if direction == "BUY" else (cross_price - live) / atr)
+    effective_extension = max(ema_directional_extension, trend_extension)
+    result.update({
+        "live_price": live, "ema9_extension_atr": extension,
+        "trend_extension_atr": trend_extension,
+        "effective_extension_atr": effective_extension,
+        "cross_price": cross_price, "max_extension_atr": float(max_extension_atr),
+    })
+    if effective_extension > float(max_extension_atr):
         result.update({"reason": "entry_window_missed_no_chase",
                        "decision_state": "NO_CHASE"})
         return result

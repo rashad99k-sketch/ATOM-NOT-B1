@@ -84,7 +84,7 @@ def test_missing_institutional_zone_is_non_blocking(monkeypatch):
 def test_nearby_resistance_blocks_buy_only_when_it_consumes_tp1_room(monkeypatch):
     location = {"support_resistance": {"resistances": [{
         "low": 101.32, "high": 101.55, "status": "CONFIRMED",
-        "confirmed_at_timestamp": 1795190000000,
+        "confirmed_at_timestamp": 1795185000000,
     }]}}
     result = _run(monkeypatch, "BUY", location=location, target=102.0)
     assert result["ready"] is False
@@ -95,7 +95,7 @@ def test_nearby_resistance_blocks_buy_only_when_it_consumes_tp1_room(monkeypatch
 def test_resistance_beyond_tp1_does_not_block_buy(monkeypatch):
     location = {"support_resistance": {"resistances": [{
         "low": 102.2, "high": 102.5, "status": "CONFIRMED",
-        "confirmed_at_timestamp": 1795190000000,
+        "confirmed_at_timestamp": 1795185000000,
     }]}}
     result = _run(monkeypatch, "BUY", location=location, target=102.0)
     assert result["ready"] is True
@@ -104,7 +104,7 @@ def test_resistance_beyond_tp1_does_not_block_buy(monkeypatch):
 def test_nearby_support_blocks_sell_only_when_it_consumes_tp1_room(monkeypatch):
     location = {"support_resistance": {"supports": [{
         "low": 98.45, "high": 98.72, "status": "CONFIRMED",
-        "confirmed_at_timestamp": 1795190000000,
+        "confirmed_at_timestamp": 1795185000000,
     }]}}
     result = _run(monkeypatch, "SELL", location=location, target=97.8)
     assert result["ready"] is False

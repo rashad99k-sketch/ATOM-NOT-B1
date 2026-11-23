@@ -6262,7 +6262,11 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
                         "trade_id": str(trade_id or result.trade_id),
                         "position_mode": result.position_mode, "position_side": result.position_side,
                         "native_sl_order_id": protected_stop_id,
+                        "native_sl_original_price": stop_value,
                         "native_sl_verified": bool(protected_stop_id),
+                        "protection_unverified": not bool(protected_stop_id),
+                        "entry_gate_snapshot": dict((management_state or {}).get("entry_gate_snapshot") or {}),
+                        "entry_location_context": dict((management_state or {}).get("location_context") or {}),
                         "entry_execution_state": result.state.value,
                         "entry_client_order_id": result.client_order_id,
                         "entry_exchange_order_id": result.exchange_order_id,
@@ -11609,7 +11613,7 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                     _proximity_frame_seconds = float(timeframe_seconds)
                     _proximity_cross_event = False
                     _proximity_cross_age = None
-                    _proximity_cross_max_age = 6.0 * _proximity_frame_seconds
+                    _proximity_cross_max_age = 8.0 * _proximity_frame_seconds
                     # This scanner now follows the same EMA9/EMA15/VWAP
                     # cross -> pullback -> separate rejection -> later break
                     # lifecycle as the final execution gate. It remains discovery-only.
@@ -11655,9 +11659,12 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                         )
                         _stage_map = {
                             "waiting_for_post_cross_pullback": "WAITING_FOR_PULLBACK",
+                            "waiting_for_pullback_touch": "WAITING_FOR_PULLBACK",
                             "waiting_for_ema_band_pullback": "WAITING_FOR_PULLBACK",
                             "waiting_for_ema_band_or_macro_pullback": "WAITING_FOR_PULLBACK",
                             "waiting_for_directional_rejection": "WAITING_FOR_REJECTION",
+                            "waiting_for_separate_directional_rejection": "WAITING_FOR_REJECTION",
+                            "waiting_for_closed_continuation_break": "WAITING_FOR_CONTINUATION_BREAK",
                             "waiting_for_continuation_break": "WAITING_FOR_CONTINUATION_BREAK",
                             "continuation_break_volume_unavailable": "WAITING_FOR_CONTINUATION_BREAK",
                             "continuation_break_volume_not_confirmed": "WAITING_FOR_CONTINUATION_BREAK",
@@ -11666,6 +11673,9 @@ def _enrich_with_existing_gpp_engines(frame, side, analysis):
                             "ema915_or_vwap_direction_not_aligned": "WAITING_FOR_RECLAIM",
                             "false_breakout_close_back_inside": "INVALIDATED",
                             "entry_window_missed_no_chase": "ENTRY_WINDOW_MISSED",
+                            "live_price_vwap_alignment_lost": "INVALIDATED",
+                            "directional_vwap_or_ema_alignment_lost": "INVALIDATED",
+                            "opposing_institutional_zone_blocks_available_room": "LOCATION_BLOCKED",
                             "cross_window_expired": "CROSS_EXPIRED",
                             "pullback_window_expired": "CROSS_EXPIRED",
                             "missing_fresh_ema9_ema15_cross": "NO_FRESH_CROSS",
