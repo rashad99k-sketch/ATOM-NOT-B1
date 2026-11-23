@@ -115,4 +115,4 @@ def test_scanner_persists_cross_event_age_and_observation_timestamp():
     assert '"observation_age_seconds": 0.0' in source
     assert '"cross_age_seconds": _proximity_cross_age' in source
     assert '"cross_fresh": bool(_active_check.get("cross_fresh") and _proximity_cross_event' in source
-    assert '"cross_fresh": bool(_check.get("cross_fresh")' in source
+    assert '_check["cross_fresh"] = bool(' in source
