@@ -653,7 +653,12 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             f"location_filter:{adaptive_gate.get('location_status', 'UNKNOWN')}",
         )
         rejection_reasons = ()
-        event_id = f"EMA9EMA15VWAP:{canonical_symbol(symbol)}:{adaptive_gate.get('signal_candle_id') or ''}"
+        timeframe_label = (
+            f"{TIMEFRAME_SECONDS // 3600}h" if TIMEFRAME_SECONDS % 3600 == 0
+            else f"{TIMEFRAME_SECONDS // 60}m" if TIMEFRAME_SECONDS % 60 == 0
+            else f"{TIMEFRAME_SECONDS}s"
+        )
+        event_id = f"{exchange_symbol(symbol)}:{timeframe_label}:{adaptive_gate.get('signal_candle_id') or ''}"
         origin_timestamp = int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1])
         structural_stop = float(adaptive_stop)
     else:
