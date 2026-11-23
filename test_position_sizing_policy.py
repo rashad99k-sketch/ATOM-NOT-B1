@@ -214,19 +214,36 @@ def _run_execute_entry(monkeypatch, *, side, balance, price=0.06, stop_pct=0.05)
         "low": base * 0.996, "close": base, "volume": np.full(n, 1000.0),
     })
     monkeypatch.setattr(ggpbot, "get_ohlcv_safe", lambda *a, **k: frame)
-    # This test isolates sizing. The primary EMA9/EMA15 + VWAP + Pullback
-    # authority is tested separately; inject one explicit valid event here.
+    # Isolate position sizing from the adaptive signal calculator without
+    # weakening its production freshness rules. The production gate has its
+    # own closed-candle / stale-event tests; this fixture injects one approved
+    # fresh EMA9 x Session-VWAP event and uses the same immutable identity for
+    # execute_entry() and open_position() last-mile revalidation.
+    test_event_id = f"{side}:TEST:{__import__('uuid').uuid4().hex}"
+    approved_gate = {
+        "ready": True,
+        "reason": "test_valid_adaptive_ema9_session_vwap_event",
+        "trigger": "EMA9_SESSION_VWAP_ADAPTIVE",
+        "decision_state": "ENTRY_READY",
+        "entry_mode": "DIRECT_ENTRY",
+        "ema9_cross": "BULLISH" if side == "BUY" else "BEARISH",
+        "cross_direction": "BULLISH" if side == "BUY" else "BEARISH",
+        "cross_timestamp": ts[-3],
+        "signal_candle_timestamp": ts[-1],
+        "signal_candle_id": test_event_id,
+        "ema9_cross_timestamp": ts[-3],
+        "ema9": price,
+        "vwap": price * (0.999 if side == "BUY" else 1.001),
+        "ema50": price,
+        "ema50_alignment": "ALIGNED_SOFT_CONTEXT",
+        "entry_zone_low": price * 0.995,
+        "entry_zone_high": price * 1.005,
+        "latest_closed_timestamp": ts[-1],
+        "cross_age_bars": 2,
+    }
     monkeypatch.setattr(
-        ggpbot, "_validate_ema915_vwap_pullback_entry_gate",
-        lambda *a, **k: {
-            "ready": True, "reason": "test_valid_ema915_pullback",
-            "cross_direction": "BULLISH" if side == "BUY" else "BEARISH",
-            "cross_timestamp": ts[-3], "pullback_timestamp": ts[-2],
-            "signal_candle_timestamp": ts[-1],
-            "signal_candle_id": f"{side}:TEST:{__import__('uuid').uuid4().hex}",
-            "ema9": price, "ema15": price, "vwap": price * (0.999 if side == "BUY" else 1.001),
-            "latest_closed_timestamp": ts[-1],
-        },
+        ggpbot, "_validate_adaptive_ema9_vwap_entry_gate",
+        lambda *a, **k: dict(approved_gate),
     )
     monkeypatch.setattr(ggpbot, "get_ticker_safe", lambda *a, **k: price)
     monkeypatch.setattr(ggpbot, "update_position_dashboard", lambda *a, **k: None)

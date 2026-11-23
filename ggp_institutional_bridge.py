@@ -15,10 +15,13 @@ import pandas as pd
 
 from roro_institutional import (
     ReversalEngine, ContinuationEngine, UnifiedEntryAuthority, DecisionState,
-    StructuralStopLossEngine,
+    StructuralStopLossEngine, InstitutionalDecision,
 )
 from roro_opportunity_pipeline import validate_closed_frame, classify_regime, confirmed_swings
-from roro_confluence import classify_liquidity, find_causal_order_block, LiquidityEvent
+from roro_confluence import (
+    classify_liquidity, find_causal_order_block, LiquidityEvent,
+    validate_adaptive_ema9_vwap_entry_gate,
+)
 from ggp_market_intelligence import (build_intelligence_decision, classify_price_pattern,
                                      build_support_resistance_zones, validate_order_block_zone)
 
@@ -543,7 +546,109 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         except (TypeError, ValueError):
             ob_ok = False
     fvg_ok = _fvg_matches_side(fvg, side)
+    sr_context = context.get("support_resistance") if isinstance(context.get("support_resistance"), dict) else {}
+    sr_key = "supports" if side == "BUY" else "resistances"
+    sr_aligned_zone = next((zone for zone in sr_context.get(sr_key, [])
+                            if isinstance(zone, dict)
+                            and str(zone.get("status") or "").upper() == "CONFIRMED"
+                            and float(zone.get("distance_atr", 999) or 999) <= 1.5
+                            and float(zone.get("strength", 0) or 0) >= 5.0), None)
+    sr_aligned = sr_aligned_zone is not None
     d, golden = _decision_result(decision), context["golden_zone"]
+
+    # Complement the existing RORO engines with an executable EMA9/Session-VWAP
+    # lane.  It still requires a validated causal location plus directional
+    # structure or a matching liquidity event; a crossover by itself is never
+    # enough to manufacture a trade.
+    adaptive_gate = {
+        "ready": False, "decision_state": "WAIT", "entry_mode": "WAIT",
+        "reason": "adaptive_cross_not_evaluated",
+    }
+    adaptive_zone = None
+    adaptive_zone_source = None
+    if ob_ok and isinstance(ob, dict):
+        adaptive_zone = (float(ob.get("low", 0) or 0), float(ob.get("high", 0) or 0))
+        adaptive_zone_source = "ORDER_BLOCK"
+    elif fvg_ok and isinstance(fvg, dict):
+        adaptive_zone = (float(fvg.get("lower", 0) or 0), float(fvg.get("upper", 0) or 0))
+        adaptive_zone_source = "FVG"
+    elif sr_aligned and isinstance(sr_aligned_zone, dict):
+        adaptive_zone = (float(sr_aligned_zone.get("low", 0) or 0), float(sr_aligned_zone.get("high", 0) or 0))
+        adaptive_zone_source = "SUPPORT" if side == "BUY" else "RESISTANCE"
+    if (adaptive_zone and not (0 < adaptive_zone[0] < adaptive_zone[1])):
+        adaptive_zone = None
+        adaptive_zone_source = None
+
+    expected_structure = "BULLISH" if side == "BUY" else "BEARISH"
+    expected_bos = "BULLISH_BOS" if side == "BUY" else "BEARISH_BOS"
+    structure = context.get("structure") if isinstance(context.get("structure"), dict) else {}
+    structure_confirmed = bool(
+        structure.get("confirmed")
+        and (str(structure.get("direction") or "").upper() == expected_structure
+             or str(structure.get("bos") or "").upper() == expected_bos)
+    )
+    liquidity_confirmed = bool(
+        str(liq_name).upper() in {"SWEEP", "GRAB", "FAILED_AUCTION"}
+        and str(liq_direction).upper() == expected_structure
+    )
+    if adaptive_zone is not None:
+        try:
+            ema_fn = lambda values, period: values.ewm(span=period, adjust=False, min_periods=period).mean()
+            adaptive_gate = validate_adaptive_ema9_vwap_entry_gate(
+                closed, side, ema_fn, timeframe_seconds=TIMEFRAME_SECONDS,
+                now_ms=now_ms, current_price=float(closed.close.iloc[-1]),
+                lookback_candles=5,
+                entry_zone_low=adaptive_zone[0], entry_zone_high=adaptive_zone[1],
+                max_chase_atr=1.5,
+            )
+        except Exception as adaptive_exc:
+            adaptive_gate = {
+                "ready": False, "decision_state": "INVALIDATED", "entry_mode": "INVALIDATED",
+                "reason": f"adaptive_gate_error:{type(adaptive_exc).__name__}",
+            }
+
+    adaptive_stop = None
+    adaptive_stop_reason = "adaptive_location_or_structure_not_confirmed"
+    if (adaptive_gate.get("ready") is True and adaptive_zone is not None
+            and (structure_confirmed or liquidity_confirmed)):
+        # Invalidation is anchored to the causal zone boundary, then buffered by
+        # the existing structural stop engine. Position sizing still applies its
+        # own max-risk cap; this path does not alter sizing or leverage.
+        structural_extreme = adaptive_zone[0] if side == "BUY" else adaptive_zone[1]
+        adaptive_stop, adaptive_stop_reason = StructuralStopLossEngine.calculate(
+            side, "EMA9_VWAP_ADAPTIVE", float(context["price"]),
+            float(structural_extreme), float(context["atr"]),
+        )
+        if adaptive_stop is not None:
+            adaptive_evidence = [
+                "ema9_vwap_cross_confirmed",
+                f"adaptive_entry:{adaptive_gate.get('entry_mode')}",
+                f"causal_zone:{adaptive_zone_source}",
+                "structure_confirmation:directional" if structure_confirmed else "liquidity_confirmation:directional_sweep",
+            ]
+            if context.get("volume_confirmed"):
+                adaptive_evidence.append("volume_expansion:confirmed")
+            else:
+                adaptive_evidence.append("volume_expansion:not_confirmed_context_only")
+            adaptive_evidence.append(f"ema50_context:{adaptive_gate.get('ema50_alignment', 'UNAVAILABLE')}")
+            adaptive_decision = InstitutionalDecision(
+                state=DecisionState.ENTRY_READY.value,
+                setup_type="EMA9_VWAP_ADAPTIVE",
+                side=side,
+                reason=str(adaptive_gate.get("reason") or "adaptive_cross_entry_ready"),
+                evidence=tuple(adaptive_evidence),
+                rejection_reasons=(),
+                event_id=f"EMA9VWAP:{canonical_symbol(symbol)}:{side}:{int(adaptive_gate.get('cross_timestamp') or 0)}",
+                origin_timestamp=int(adaptive_gate.get("cross_timestamp") or closed.timestamp.iloc[-1]),
+                invalidation_level=float(adaptive_stop),
+                structural_stop=float(adaptive_stop),
+                score=float(getattr(decision, "score", 0.0) or 0.0),
+            )
+            # A ready, location-first EMA9/VWAP setup may authorize alongside
+            # legacy RORO candidates; a ready RORO setup retains precedence.
+            if decision.state != DecisionState.ENTRY_READY.value:
+                decision = adaptive_decision
+                d = _decision_result(decision)
     # Explainable mode/entry-behavior classification. This is analytical metadata only;
     # UnifiedEntryAuthority and execute_entry remain the sole entry authorization path.
     _liq_conf = getattr(liq, "confidence", 0.0)
@@ -595,9 +700,11 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol),
         "side": side, "price": context["price"], "market_regime": reg.state,
         "regime_direction": reg.direction, "market_structure": context["structure"],
-        "setup_type": "REVERSAL_ENGINE" if "REVERSAL" in decision.setup_type or decision.setup_type == "FAILED_AUCTION_REVERSAL" else "TREND_CONTINUATION_ENGINE" if "CONTINUATION" in decision.setup_type else "NONE",
+        "setup_type": "REVERSAL_ENGINE" if "REVERSAL" in decision.setup_type or decision.setup_type == "FAILED_AUCTION_REVERSAL" else "TREND_CONTINUATION_ENGINE" if "CONTINUATION" in decision.setup_type else "EMA9_VWAP_ADAPTIVE" if decision.setup_type == "EMA9_VWAP_ADAPTIVE" else "NONE",
         "decision_setup_type": decision.setup_type, "decision_state": decision.state,
         "decision_reason": decision.reason, "evidence": d.get("evidence", []),
+        "adaptive_entry_gate": dict(adaptive_gate),
+        "adaptive_entry_location_source": adaptive_zone_source,
         "rejection_reasons": d.get("rejection_reasons", []), "event_id": decision.event_id,
         "origin_timestamp": decision.origin_timestamp, "structural_stop": decision.structural_stop,
         "invalidation_level": decision.invalidation_level, "score": float(decision.score),
@@ -613,8 +720,8 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "entry_behavior": _intelligence.get("entry_behavior", "WAIT_FOR_STRUCTURE"),
         "entry_behavior_confidence": float(_intelligence.get("confidence", 0.0) or 0.0),
         "entry_behavior_reasons": list(_intelligence.get("reason_codes") or []),
-        "entry_zone_low": _intelligence.get("reference_low"),
-        "entry_zone_high": _intelligence.get("reference_high"),
+        "entry_zone_low": (_intelligence.get("reference_low") if decision.setup_type != "EMA9_VWAP_ADAPTIVE" else (adaptive_zone[0] if adaptive_zone else None)),
+        "entry_zone_high": (_intelligence.get("reference_high") if decision.setup_type != "EMA9_VWAP_ADAPTIVE" else (adaptive_zone[1] if adaptive_zone else None)),
         "adx": float(_adx_value) if np.isfinite(_adx_value) else None,
         "reversal": _decision_result(rev), "continuation": _decision_result(cont), "entry_status": decision.state,
         "icons": {
@@ -627,7 +734,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             "golden_zone": "🌟" if golden.get("state") == "GOLDEN_CONFLUENCE" else "🟨" if golden.get("score", 0) >= 35 else "⚪",
             "volume": "📊" if context["volume_confirmed"] else "⚪",
             "setup": "🎯" if decision.state == DecisionState.ENTRY_READY.value else "👁",
-            "pullback": "🔄" if any(any(token in str(ev).lower() for token in ("retest", "pullback", "micro_pullback")) for ev in decision.evidence) else "⚪",
+            "pullback": "🔄" if any(any(token in str(ev).lower() for token in ("retest", "pullback", "micro_pullback")) for ev in decision.evidence) or (decision.setup_type == "EMA9_VWAP_ADAPTIVE" and adaptive_gate.get("entry_mode") in {"MICRO_PULLBACK", "RETEST_ENTRY"}) else "⚪",
             "stop": "🛑" if decision.structural_stop else "⚪",
             "status": "✅" if decision.state == DecisionState.ENTRY_READY.value else "🟡" if decision.state.startswith("WAITING") or decision.state == "NO_CHASE" else "⚪",
         },
