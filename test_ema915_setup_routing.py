@@ -42,7 +42,7 @@ REVERSAL_EVIDENCE = [
 def test_reversal_uses_crossover_as_trigger_then_requires_institutional_sweep_mss_retest():
     frame, now_ms = _cross_frame()
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=float(frame["close"].iloc[-1]),
         setup_mode="LIQUIDITY_SWEEP_REVERSAL",
         institutional_evidence=REVERSAL_EVIDENCE,
@@ -159,45 +159,65 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
 
 
 def _impulse_frame(side="BUY"):
-    frame, now_ms = _cross_frame()
+    import numpy as np
+    import roro_confluence as confluence
+
+    frame, _ = _cross_frame()
     direction = 1.0 if side == "BUY" else -1.0
-    # Match the production EMA crossover detector: EMA9 rises above/falls below
-    # EMA15 at -3, then the following -2 candle is the confirmed impulse BOS.
-    cross_index = len(frame) - 3
-    base = 100.0
-    for i in range(len(frame) - 12, len(frame)):
-        if i < cross_index:
-            frame.loc[i, ["open", "high", "low", "close", "volume"]] = [
-                base, base + 0.04, base - 0.04, base, 100.0
-            ]
-    frame.loc[cross_index, ["open", "high", "low", "close", "volume"]] = [
-        base, base + 0.16 * direction, base - 0.16 * direction,
-        base + 0.10 * direction, 100.0
+    frame.loc[:, "open"] = 100.0
+    frame.loc[:, "high"] = 100.05
+    frame.loc[:, "low"] = 99.95
+    frame.loc[:, "close"] = 100.0
+    frame.loc[:, "volume"] = 100.0
+    # Cross on candle -3; -2 is the post-cross transition; -1 is the impulse.
+    frame.loc[len(frame) - 3, ["open", "high", "low", "close", "volume"]] = [
+        100.0, 100.10 if side == "BUY" else 100.0,
+        100.0 if side == "BUY" else 99.90,
+        100.05 if side == "BUY" else 99.95, 100.0
     ]
-    level = 100.10 if side == "BUY" else 99.90
+    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
+        100.0, 100.05, 99.95, 100.0, 100.0
+    ]
+    prior = frame.iloc[-11:-1]
+    level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
     open_price = level - 1.00 * direction
     close_price = level + 1.00 * direction
-    low = min(open_price, close_price) - 0.05
-    high = max(open_price, close_price) + 0.05
-    frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
-        open_price, high, low, close_price, 300.0
-    ]
-    # The last candle is a small continuation after the impulse; the gate must
-    # still evaluate the impulse candle's own BOS and quality metrics.
     frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
-        close_price, close_price + 0.08 * direction,
-        close_price - 0.02 * direction, close_price + 0.05 * direction, 100.0
+        open_price, max(open_price, close_price) + 0.05,
+        min(open_price, close_price) - 0.05, close_price, 300.0
     ]
-    live = close_price + 0.06 * direction
-    return frame, int(frame.timestamp.iloc[-1] + 901_000), live
+
+    def impulse_ema(values, period):
+        if period == 9:
+            if side == "BUY":
+                arr = np.full(len(values), 101.8, dtype=float)
+                arr[-3:] = 102.0
+            else:
+                arr = np.full(len(values), 98.2, dtype=float)
+                arr[-3:] = 98.0
+        elif period == 15:
+            arr = np.full(len(values), 101.9 if side == "BUY" else 98.1, dtype=float)
+        elif period == 20:
+            arr = np.full(len(values), 100.0, dtype=float)
+        else:
+            arr = values.ewm(span=period, adjust=False).mean().to_numpy(dtype=float)
+        return pd.Series(arr, index=values.index)
+
+    monkeypatch_vwap = 100.5 if side == "SELL" else 99.5
+    confluence.compute_session_vwap = lambda closed, timeframe_seconds, now_ms=None: pd.Series(
+        monkeypatch_vwap, index=closed.index, dtype=float
+    )
+    live = close_price + 0.02 * direction
+    return frame, int(frame.timestamp.iloc[-1] + 901_000), live, impulse_ema
 
 
-def test_continuation_allows_qualified_bullish_impulse_without_pullback():
-    frame, now_ms, live = _impulse_frame("BUY")
+
+def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypatch):
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_low=101.8, entry_zone_high=102.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is True
@@ -207,12 +227,12 @@ def test_continuation_allows_qualified_bullish_impulse_without_pullback():
     assert result["causal_zone_confirmed"] is True
 
 
-def test_continuation_allows_qualified_bearish_impulse_without_pullback():
-    frame, now_ms, live = _impulse_frame("SELL")
+def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypatch):
+    frame, now_ms, live, impulse_ema = _impulse_frame("SELL")
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "SELL", _ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "SELL", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=99.0, entry_zone_high=100.2,
+        entry_zone_low=97.8, entry_zone_high=98.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is True
@@ -234,11 +254,11 @@ def test_impulse_requires_all_three_quality_confirmations_and_bos():
 
 
 def test_impulse_no_chase_never_authorizes_late_price():
-    frame, now_ms, live = _impulse_frame("BUY")
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
     result = validate_ema915_vwap_pullback_entry_gate(
-        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live + 3.0, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_low=101.8, entry_zone_high=102.2,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is False
