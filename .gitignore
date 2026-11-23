@@ -37,3 +37,6 @@ GGP_INSTITUTIONAL_*_FIXED.zip
 
 # Local download staging (served over the work host; not part of the release)
 downloads/
+
+# Persistent EMA/VWAP setup registry (runtime state)
+data/unified_ema_vwap_watchlist.json
