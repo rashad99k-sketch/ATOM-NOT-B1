@@ -6722,6 +6722,13 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
     except Exception as gate_exc:
         gate_result = {"ready": False, "reason": f"gate_error:{type(gate_exc).__name__}"}
     raw_signal_id = str(gate_result.get("signal_candle_id") or "").strip()
+    if gate_result.get("ready") and gate_event_id and raw_signal_id:
+        expected_context_signal_id = ":".join(str(gate_event_id).split(":")[-4:])
+        if expected_context_signal_id != raw_signal_id:
+            gate_result.update({
+                "ready": False, "decision_state": "INVALIDATED",
+                "reason": "entry_context_event_identity_mismatch",
+            })
     if raw_signal_id:
         try:
             event_symbol = normalize_symbol(symbol)
@@ -12072,6 +12079,39 @@ def smart_opportunity_selection():
                 item["decision_state"] = "REJECTED"
                 item["rejection_reason"] = "profit_targets_invalid"
                 continue
+            location_context = {
+                "support_resistance": dict(item.get("support_resistance") or {}),
+                "order_block": dict(item.get("order_block") or {}),
+                "fvg": dict(item.get("fvg") or {}),
+                "supply_zones": list(item.get("supply_zones") or []),
+                "demand_zones": list(item.get("demand_zones") or []),
+                "zones": list(item.get("zones") or []),
+            }
+            # Re-run the same rule with the actual TP1 target before promoting
+            # the watchlist candidate to the execution gateway. This catches
+            # an opposing zone that is not immediately close but consumes too
+            # much of the available path to TP1.
+            authorization_gate = _validate_ema915_vwap_location_first_entry_gate(
+                closed_df, side, ema,
+                timeframe_seconds=_roro_timeframe_seconds(str(INTERVAL)),
+                now_ms=int(time.time() * 1000), current_price=float(price),
+                max_cross_age_bars=8, pullback_lookback_bars=5,
+                max_extension_atr=1.5, location_context=location_context,
+                target_price=float(tp1),
+            )
+            if not authorization_gate.get("ready"):
+                item["decision_state"] = authorization_gate.get("decision_state") or "NO_CHASE"
+                item["rejection_reason"] = authorization_gate.get("reason") or "ema915_authorization_gate_blocked"
+                item["authorization_gate"] = dict(authorization_gate)
+                continue
+            expected_signal_id = ":".join(event_id.split(":")[-4:])
+            if authorization_gate.get("signal_candle_id") != expected_signal_id:
+                item["decision_state"] = "INVALIDATED"
+                item["rejection_reason"] = "entry_event_identity_mismatch"
+                continue
+            item["authorization_gate"] = dict(authorization_gate)
+            item["entry_zone_low"] = authorization_gate.get("entry_zone_low")
+            item["entry_zone_high"] = authorization_gate.get("entry_zone_high")
             evidence = list(item.get("evidence") or [])
             market_intelligence = item.get("market_intelligence") if isinstance(item.get("market_intelligence"), dict) else {}
 
@@ -12087,13 +12127,7 @@ def smart_opportunity_selection():
                 "entry_zone_high": safe_float(item.get("entry_zone_high", market_intelligence.get("reference_high")), 0.0),
                 "entry_zone_available_timestamp": item.get("adaptive_entry_location_timestamp"),
                 "support_resistance": dict(item.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
-                "location_context": {
-                    "support_resistance": dict(item.get("support_resistance") or {"status": "UNKNOWN", "supports": [], "resistances": []}),
-                    "order_block": dict(item.get("order_block") or {}),
-                    "fvg": dict(item.get("fvg") or {}),
-                    "supply_zones": list(item.get("supply_zones") or []),
-                    "demand_zones": list(item.get("demand_zones") or []),
-                },
+                "location_context": dict(location_context),
                 "order_block": dict(item.get("order_block") or {}),
                 "fvg": dict(item.get("fvg") or {}),
                 "liquidity": dict(item.get("liquidity") or {}),
