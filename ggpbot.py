@@ -13872,19 +13872,31 @@ def sync_position_state(symbol=None):
     return snap.mark_price, snap.unrealized_pnl, snap.margin, snap.roe_pct
 
 
+_LAST_IDLE_POSITION_SYNC_MONOTONIC = 0.0
+_LAST_REALIZED_PNL_SYNC_MONOTONIC = 0.0
+IDLE_POSITION_SYNC_INTERVAL_SECONDS = 5.0
+REALIZED_PNL_SYNC_INTERVAL_SECONDS = 30.0
+
+
 def sync_all_states():
+    """Keep exposure reconciliation responsive without polling account history every loop."""
     global RECOVERY_BLOCK_ENTRIES
+    global _LAST_IDLE_POSITION_SYNC_MONOTONIC, _LAST_REALIZED_PNL_SYNC_MONOTONIC
     if PAPER_MODE:
         MEMORY["position_status"] = "OPEN" if STATE.get("open") else "FLAT"
         MEMORY["total_pnl"] = PERF.get("total_pnl_usdt", 0.0)
         MEMORY["total_pnl_pct"] = PERF.get("total_pnl_pct", 0.0) * 100
         RECOVERY_BLOCK_ENTRIES = False
         return
+
+    now_mono = time.monotonic()
     symbol = STATE.get("current_symbol") if STATE.get("open") else None
     if symbol:
+        # Open-position reconciliation remains on every supervisor cycle.
         sync_position_state(symbol)
-    else:
+    elif now_mono - _LAST_IDLE_POSITION_SYNC_MONOTONIC >= IDLE_POSITION_SYNC_INTERVAL_SECONDS:
         status, positions = fetch_position_tri_state(None)
+        _LAST_IDLE_POSITION_SYNC_MONOTONIC = now_mono
         if status == "UNKNOWN":
             MEMORY["position_status"] = "UNKNOWN"
             MEMORY["current_position"] = None
@@ -13892,25 +13904,29 @@ def sync_all_states():
         elif status == "FLAT":
             MEMORY["position_status"] = "FLAT"
             MEMORY["current_position"] = None
-            # Confirmed flat resolves an ambiguous order write without fabricating a fill.
             STATE["execution_unresolved"] = False
             STATE["recovery_hold"] = False
             RECOVERY_BLOCK_ENTRIES = False
         elif status == "OPEN" and positions:
             if len(positions) == 1:
                 position = positions[0]
-                key = roro_canonical_symbol(_position_symbol(position))
                 _attempt_runtime_trade_recovery(_position_symbol(position), position=position, force=False)
             else:
                 MEMORY["position_status"] = "MULTIPLE_OPEN"
                 RECOVERY_BLOCK_ENTRIES = True
-    symbol_for_pnl = symbol or DEFAULT_SYMBOL
-    try:
-        real_pnl, real_pnl_pct = get_realized_pnl(symbol_for_pnl)
-        MEMORY["total_pnl"] = real_pnl
-        MEMORY["total_pnl_pct"] = real_pnl_pct
-    except Exception:
-        pass
+
+    if now_mono - _LAST_REALIZED_PNL_SYNC_MONOTONIC >= REALIZED_PNL_SYNC_INTERVAL_SECONDS:
+        symbol_for_pnl = symbol or DEFAULT_SYMBOL
+        try:
+            real_pnl, real_pnl_pct = get_realized_pnl(symbol_for_pnl)
+            MEMORY["total_pnl"] = real_pnl
+            MEMORY["total_pnl_pct"] = real_pnl_pct
+            _LAST_REALIZED_PNL_SYNC_MONOTONIC = now_mono
+        except Exception as exc:
+            log_execution(
+                f"[PNL_SYNC] realized PnL refresh failed: {type(exc).__name__}: {exc}",
+                "WARN", debounce_key="realized_pnl_sync_error", debounce_sec=60
+            )
 
 
 # Serialize final entry authorization so one closed-candle trigger cannot
