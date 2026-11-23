@@ -64,6 +64,6 @@ def test_multiple_exchange_positions_still_pause_discovery():
 def test_entry_authorization_keeps_explicit_recovery_fail_closed_guard():
     source = (_project_root() / "ggpbot.py").read_text(encoding="utf-8")
     node = _function(source, "smart_opportunity_selection")
-    names = {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
-    assert "RECOVERY_BLOCK_ENTRIES" in names
-    assert any(isinstance(item, ast.Constant) and item.value == "position_status" for item in ast.walk(node))
+    constants = {item.value for item in ast.walk(node) if isinstance(item, ast.Constant)}
+    assert "RECOVERY_BLOCK_ENTRIES" in constants
+    assert "position_status" in constants
