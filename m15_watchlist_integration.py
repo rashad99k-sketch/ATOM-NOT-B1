@@ -47,6 +47,29 @@ def _sync_active_feed(memory: Dict[str, Any]) -> list:
     return active
 
 
+def _update_radar_meta(memory: Dict[str, Any], *, now_ms: int, symbol: str,
+                       data_unavailable: bool = False, reason: Optional[str] = None) -> None:
+    rows = [item for item in memory.get("m15_crossover_radar", []) if isinstance(item, dict)]
+    meta = memory.setdefault("m15_crossover_radar_meta", {})
+    meta.update({
+        "state": "PARTIAL_DATA" if data_unavailable else "ACTIVE" if rows else "NO_CANDIDATES",
+        "timeframe": "15m",
+        "source": "SCANNER_2_SHARED_CLOSED_FRAME",
+        "closed_candles_only": True,
+        "entry_authorization": False,
+        "last_update_ms": int(now_ms),
+        "last_symbol": str(symbol),
+        "frames_processed_total": int(meta.get("frames_processed_total", 0) or 0) + 1,
+        "candidate_count": len(rows),
+        "confirmed_count": sum(1 for item in rows if item.get("crossover_status") == "CROSS_CONFIRMED"),
+        "provisional_count": sum(1 for item in rows if item.get("crossover_status") == "CROSS_DETECTED"),
+        "early_count": sum(1 for item in rows if item.get("crossover_status") == "PRE_CROSS"),
+        "last_data_error": str(reason) if data_unavailable and reason else None,
+    })
+    if data_unavailable:
+        meta["data_unavailable_count"] = int(meta.get("data_unavailable_count", 0) or 0) + 1
+
+
 def process_m15_watchlist_frame(
     symbol: str,
     closed_frame: Any,
@@ -79,6 +102,7 @@ def process_m15_watchlist_frame(
         if last_seen.get(key) == candle_ts and isinstance(prior_row, dict):
             candle_age_ms = now_ms - (candle_ts + 900_000)
             if candle_age_ms <= 1_800_000 or not prior_row.get("lifecycle_active"):
+                _update_radar_meta(memory, now_ms=now_ms, symbol=key)
                 return copy.deepcopy(prior_row)
             stale_row = dict(prior_row)
             stale_row.update({
@@ -94,10 +118,13 @@ def process_m15_watchlist_frame(
                 item for item in memory.get("m15_crossover_radar", [])
                 if not isinstance(item, dict) or _canonical(item.get("symbol")) != key
             ][:_MAX_RADAR_ROWS]
+            _update_radar_meta(memory, now_ms=now_ms, symbol=key)
             return copy.deepcopy(stale_row)
 
         row = evaluate_m15_radar(key, closed_frame, now_ms=now_ms)
         if row.get("crossover_status") == "DATA_UNAVAILABLE":
+            _update_radar_meta(memory, now_ms=now_ms, symbol=key, data_unavailable=True,
+                               reason=row.get("rejection_reason") or "DATA_UNAVAILABLE")
             return row
         row = advance_m15_setup_lifecycle(row, now_ms=now_ms, cycle_id=candle_ts)
         last_seen[key] = candle_ts
@@ -162,15 +189,18 @@ def process_m15_watchlist_frame(
             item for item in memory.get("m15_crossover_radar", [])
             if isinstance(item, dict) and _canonical(item.get("symbol")) != key
         ]
-        if row.get("crossover_status") != "NO_ACTIVE_CROSS" or row.get("lifecycle_active"):
+        if row.get("crossover_status") in {"CROSS_CONFIRMED", "CROSS_DETECTED", "PRE_CROSS"} or row.get("lifecycle_active"):
             current.append(copy.deepcopy(row))
         current.sort(key=lambda item: (
-            0 if item.get("lifecycle_breakout_status") == "SUCCESSFUL_BREAKOUT" else
-            1 if item.get("lifecycle_active") else 2,
+            0 if item.get("crossover_status") == "CROSS_CONFIRMED" else
+            1 if item.get("crossover_status") == "CROSS_DETECTED" else
+            2 if item.get("crossover_status") == "PRE_CROSS" else 3,
+            int(item.get("cross_age_bars") if item.get("cross_age_bars") is not None else 999),
             -int(item.get("last_update_ms") or 0), _canonical(item.get("symbol")),
         ))
         memory["m15_crossover_radar"] = current[:_MAX_RADAR_ROWS]
         _sync_active_feed(memory)
+        _update_radar_meta(memory, now_ms=now_ms, symbol=key)
         row["entry_authorization"] = False
         row["entry_readiness"] = "NOT_AUTHORIZED_BY_RADAR"
         return copy.deepcopy(row)
