@@ -10386,9 +10386,25 @@ def manual_close():
 
 @app.route("/health")
 def health():
+    runtime_state = MEMORY.get("runtime_supervisor") if isinstance(MEMORY.get("runtime_supervisor"), dict) else {}
+    heartbeat_ts = safe_float(runtime_state.get("heartbeat_ts"), 0.0)
+    heartbeat_age = max(0.0, time.time() - heartbeat_ts) if heartbeat_ts > 0 else None
+    runtime_status = str(runtime_state.get("status") or "NOT_STARTED")
+    if runtime_status == "RUNNING" and (heartbeat_age is None or heartbeat_age > 90.0):
+        runtime_status = "STALE"
     return jsonify({
         "ok": True,
         "mode": "LIVE" if MODE_LIVE else "PAPER",
+        "trading_runtime": {
+            "status": runtime_status,
+            "launch_mode": runtime_state.get("launch_mode"),
+            "started_at": runtime_state.get("started_at"),
+            "heartbeat_ts": heartbeat_ts or None,
+            "heartbeat_age_seconds": round(heartbeat_age, 2) if heartbeat_age is not None else None,
+            "loop_cycles": int(runtime_state.get("loop_cycles", 0) or 0),
+            "thread_alive": bool(runtime_state.get("thread_alive", False)),
+            "last_error": runtime_state.get("last_error"),
+        },
         "dashboard_ports": globals().get("DASHBOARD_ACTIVE_PORTS", []),
         "discovery_scanner": MEMORY.get("discovery_scanner", {}).get("state", "UNKNOWN"),
         "proximity_scanner": MEMORY.get("ema9_vwap_proximity_scanner_meta", {}).get("state", "UNKNOWN"),
@@ -10396,6 +10412,35 @@ def health():
         "trade_management_events": len(TRADE_MANAGEMENT_LOG),
         "telegram": TELEGRAM_NOTIFIER.status(),
     })
+
+@app.route("/runtime-health")
+def runtime_health():
+    runtime_state = MEMORY.get("runtime_supervisor") if isinstance(MEMORY.get("runtime_supervisor"), dict) else {}
+    now = time.time()
+    heartbeat_ts = safe_float(runtime_state.get("heartbeat_ts"), 0.0)
+    started_at = safe_float(runtime_state.get("started_at"), 0.0)
+    heartbeat_age = max(0.0, now - heartbeat_ts) if heartbeat_ts > 0 else None
+    startup_age = max(0.0, now - started_at) if started_at > 0 else None
+    status = str(runtime_state.get("status") or "NOT_STARTED")
+    ready = status == "RUNNING" and heartbeat_age is not None and heartbeat_age <= 90.0
+    if status == "STARTING" and startup_age is not None and startup_age <= 180.0:
+        ready = True
+    if status == "RUNNING" and not ready:
+        status = "STALE"
+    payload = {
+        "ok": bool(ready),
+        "status": status,
+        "mode": "LIVE" if MODE_LIVE else "PAPER",
+        "heartbeat_age_seconds": round(heartbeat_age, 2) if heartbeat_age is not None else None,
+        "startup_age_seconds": round(startup_age, 2) if startup_age is not None else None,
+        "loop_cycles": int(runtime_state.get("loop_cycles", 0) or 0),
+        "thread_alive": bool(runtime_state.get("thread_alive", False)),
+        "last_error": runtime_state.get("last_error"),
+        "discovery_scanner": MEMORY.get("discovery_scanner", {}).get("state", "UNKNOWN"),
+        "watchlist_scanner": MEMORY.get("institutional_watchlist_meta", {}).get("state", "UNKNOWN"),
+    }
+    return jsonify(payload), (200 if ready else 503)
+
 
 app.add_url_rule('/narrative-debug', 'narrative_debug', narrative_debug)
 
@@ -11393,6 +11438,14 @@ def main_loop_sniper():
     while True:
         try:
             now = time.time()
+            runtime_state = MEMORY.setdefault("runtime_supervisor", {})
+            runtime_state.update({
+                "status": "RUNNING",
+                "heartbeat_ts": now,
+                "last_cycle_started_at": now,
+                "thread_alive": True,
+            })
+            runtime_state["loop_cycles"] = int(runtime_state.get("loop_cycles", 0) or 0) + 1
             sync_all_states()
             cooldown_active_now = daily_loss_cooldown_active()
             if cooldown_active_now and not (STATE.get("open") or TRADE_STATE.get("in_position")):
@@ -13883,6 +13936,11 @@ if __name__ == "__main__":
     if _GGP_INSTANCE_LOCK is None:
         raise SystemExit("[SINGLE_INSTANCE] Another JGB_GGP process already owns the runtime lock. No dashboard or orders started.")
     print("[SINGLE_INSTANCE] Runtime lock acquired.")
+    MEMORY["runtime_supervisor"] = {
+        "status": "STARTING", "launch_mode": "direct",
+        "started_at": time.time(), "heartbeat_ts": None,
+        "loop_cycles": 0, "thread_alive": True, "last_error": None,
+    }
     # Serve the local/hosted Dashboard independently while the trade supervisor
     # stays on the foreground thread. This avoids daemon-only process exit.
     start_dashboard_servers()
