@@ -6991,67 +6991,32 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
     adx_val = adx_series.iloc[-1] if adx_series is not None and len(adx_series) > 0 else 20.0
 
     if not PAPER_MODE and MODE_LIVE:
-        institutional_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT")
-        if institutional_ctx:
-            setup = str(institutional_ctx.get("setup_type", "")).upper()
-            evidence = [str(x).lower() for x in institutional_ctx.get("evidence", [])]
-            if setup in ("REVERSAL_ENGINE", "LIQUIDITY_SWEEP_REVERSAL"):
-                required = ("prior_liquidity_pool", "sweep", "reclaim", "closed_mss", "directional_trigger")
-                valid = all(any(token in ev for ev in evidence) for token in required) and any(ev.startswith("post_mss_retest:") for ev in evidence)
-            elif setup == "FAILED_AUCTION_REVERSAL":
-                required = ("failed_auction", "outside_acceptance_failed", "reclaim", "closed_mss", "directional_trigger")
-                valid = all(any(token in ev for ev in evidence) for token in required) and any(ev.startswith("post_mss_retest:") for ev in evidence)
-            elif setup in ("TREND_CONTINUATION_ENGINE", "TREND_CONTINUATION_RETEST"):
-                has_bos = any("bos" in ev for ev in evidence)
-                has_displacement = any("displacement" in ev for ev in evidence)
-                has_retest = any(token in ev for ev in evidence for token in ("retest:", "pullback:", "micro_pullback:"))
-                has_trigger = any("post_retest_trigger" in ev for ev in evidence)
-                valid = has_bos and has_displacement and has_retest and has_trigger
-            elif setup == "EMA9_VWAP_ADAPTIVE":
-                expected_cross = "BULLISH" if side == "BUY" else "BEARISH"
-                valid = bool(
-                    gate_result.get("ready") is True
-                    and gate_result.get("gate_kind") == "EMA915_VWAP_LOCATION_FIRST"
-                    and gate_result.get("decision_state") == "ENTRY_READY"
-                    and gate_result.get("cross_direction") == expected_cross
-                    and gate_result.get("pullback_touch") is True
-                    and gate_result.get("rejection_confirmed") is True
-                    and gate_result.get("continuation_break") is True
-                    and gate_result.get("entry_mode") in {
-                        "PULLBACK_RETEST_REJECTION_BREAK",
-                        "MACRO_PULLBACK_REJECTION_BREAK",
-                    }
-                    and gate_result.get("location_status") in {
-                        "CLEAR", "UNKNOWN_NON_BLOCKING",
-                    }
-                )
-            else:
-                valid = False
-            if not valid:
-                log_execution(f"[ENTRY] Institutional authorization incomplete for {setup}; LIVE blocked", "ERROR")
-                return False
-            # ADX, EMA and VWAP remain contextual evidence. They are not universal entry gates.
+        expected_cross = "BULLISH" if side == "BUY" else "BEARISH"
+        live_authorized = bool(
+            gate_result.get("ready") is True
+            and gate_result.get("gate_kind") == "EMA915_VWAP_LOCATION_FIRST"
+            and gate_result.get("decision_state") == "ENTRY_READY"
+            and gate_result.get("cross_direction") == expected_cross
+            and gate_result.get("pullback_touch") is True
+            and gate_result.get("rejection_confirmed") is True
+            and gate_result.get("continuation_break") is True
+            and gate_result.get("entry_mode") in {
+                "PULLBACK_RETEST_REJECTION_BREAK",
+                "MACRO_PULLBACK_REJECTION_BREAK",
+            }
+            and gate_result.get("location_status") in {"CLEAR", "UNKNOWN_NON_BLOCKING"}
+        )
+        if not live_authorized:
             log_execution(
-                f"[ENTRY] Setup authorized: {setup}; EMA9/EMA15 + VWAP is primary, "
-                f"institutional analysis is location-only; ADX={adx_val:.1f} is context",
-                "INFO",
+                f"[ENTRY] Unified EMA9/EMA15 + VWAP authorization incomplete for {symbol} {side}; LIVE blocked",
+                "ERROR",
             )
-        else:
-            # Legacy/manual entry path keeps its existing stricter safeguards.
-            if not (25 <= adx_val <= 38):
-                log_execution(f"[ENTRY] Legacy path ADX {adx_val:.1f} not in [25,38] – skipping", "WARN")
-                return False
-            if df is not None:
-                liquidity_ctx = detect_liquidity_context(df, lookback=10)
-                if side == "BUY" and liquidity_ctx != "sell_side_taken":
-                    log_execution(f"[ENTRY] Legacy BUY requires sell-side liquidity sweep, got {liquidity_ctx}", "WARN")
-                    return False
-                if side == "SELL" and liquidity_ctx != "buy_side_taken":
-                    log_execution(f"[ENTRY] Legacy SELL requires buy-side liquidity sweep, got {liquidity_ctx}", "WARN")
-                    return False
-            else:
-                log_execution("[ENTRY] No DF for legacy liquidity check, skipping", "WARN")
-                return False
+            return False
+        log_execution(
+            f"[ENTRY] Unified EMA9/EMA15 + VWAP setup authorized for {symbol} {side}; "
+            "institutional engines are location-only and ADX/DI remain context",
+            "INFO",
+        )
 
     plus_di, minus_di, _, _ = get_di_components(df) if df is not None else (None, None, None, None)
     di_dominance = False
