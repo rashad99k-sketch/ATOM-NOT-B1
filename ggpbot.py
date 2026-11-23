@@ -9641,6 +9641,7 @@ def dashboard():
     flow_section_html = """
     <div class="section smart-layer">
       <div class="title">🧠 Institutional Flow Intelligence</div>
+      <div id="flow-meta" style="font-size:11px;color:#9ca3af;margin:4px 0 8px;">Waiting for a valid closed-candle flow snapshot...</div>
       <div class="rf-flow-grid">
         <div class="rf-flow-card"><div class="rf-flow-metric-label">Banker Pressure</div><div id="flow-banker" class="rf-flow-value">-</div></div>
         <div class="rf-flow-card"><div class="rf-flow-metric-label">Retail Pressure</div><div id="flow-retail" class="rf-flow-value">-</div></div>
@@ -10224,23 +10225,13 @@ def data():
         else:
             live_data["live_trade_mode"] = False
 
-        institutional_flow_data = DASHBOARD_STATE.get("institutional_flow", {})
-        if not institutional_flow_data and STATE.get("smart_money"):
-            mf = STATE.get("momentum_flow", {})
+        institutional_flow_data = DASHBOARD_STATE.get("institutional_flow")
+        if not isinstance(institutional_flow_data, dict) or not institutional_flow_data:
             institutional_flow_data = {
-                "banker_pressure": STATE["smart_money"].get("banker_pressure", 0),
-                "retailer_pressure": STATE["smart_money"].get("retailer_pressure", 0),
-                "hot_money": STATE["smart_money"].get("hot_money_pressure", 0),
-                "institutional_bias": STATE["smart_money"].get("institutional_bias", "NEUTRAL"),
-                "institutional_bias_detailed": STATE["smart_money"].get("institutional_bias_detailed", "NEUTRAL"),
-                "flow_alignment": STATE["smart_money"].get("flow_alignment", 0),
-                "distribution_risk": STATE["smart_money"].get("distribution_risk", 0),
-                "momentum_health": mf.get("momentum_health", 0),
-                "continuation_strength": mf.get("continuation_strength", 0),
-                "exhaustion_risk": mf.get("exhaustion_risk", 0),
-                "climax_risk": mf.get("climax_risk", 0),
-                "greed_state": mf.get("greed_state", False),
-                "smart_money_dominant": STATE["smart_money"].get("smart_money_dominant", False)
+                "status": "DATA_UNAVAILABLE",
+                "reason": "NO_VALID_FLOW_SNAPSHOT",
+                "source": None, "source_symbol": None, "source_timeframe": None,
+                "last_valid_update_ms": None,
             }
 
         payload = {
@@ -10271,6 +10262,10 @@ def data():
             "ema9_vwap_proximity_scanner": MEMORY.get("ema9_vwap_proximity_scanner", [])[:30],
             "ema9_vwap_proximity_scanner_meta": MEMORY.get("ema9_vwap_proximity_scanner_meta", {}),
             "m15_crossover_radar": MEMORY.get("m15_crossover_radar", [])[:60],
+            "m15_crossover_radar_meta": MEMORY.get("m15_crossover_radar_meta", {
+                "state": "NOT_STARTED", "timeframe": "15m",
+                "source": "SCANNER_2_SHARED_CLOSED_FRAME", "closed_candles_only": True,
+            }),
             "crossover_snapshot_status": snapshot_status(),
             "watchlist": watchlist_data,
             "no_entry_feed": no_entry_feed,
@@ -11100,77 +11095,125 @@ def _run_sniper_scan_if_due():
 
 
 # ========== SCANNER CONTEXT MODE – update institutional flow without a trade ==========
+def _build_institutional_flow_snapshot(smart, momentum, symbol, closed_frame):
+    now_ms = int(time.time() * 1000)
+    try:
+        candle_ts = int(closed_frame["timestamp"].iloc[-1])
+    except Exception:
+        candle_ts = None
+    return {
+        "status": "VALID",
+        "source": "BINGX_CLOSED_OHLCV",
+        "source_symbol": str(symbol),
+        "source_timeframe": str(INTERVAL),
+        "source_candle_timestamp_ms": candle_ts,
+        "last_valid_update_ms": now_ms,
+        "last_attempt_ms": now_ms,
+        "reason": None,
+        "banker_pressure": smart.get("banker_pressure"),
+        "retailer_pressure": smart.get("retailer_pressure"),
+        "hot_money": smart.get("hot_money_pressure"),
+        "institutional_bias": smart.get("institutional_bias"),
+        "institutional_bias_detailed": smart.get("institutional_bias_detailed"),
+        "flow_alignment": smart.get("flow_alignment"),
+        "distribution_risk": smart.get("distribution_risk"),
+        "momentum_health": momentum.get("momentum_health"),
+        "continuation_strength": momentum.get("continuation_strength"),
+        "exhaustion_risk": momentum.get("exhaustion_risk"),
+        "climax_risk": momentum.get("climax_risk"),
+        "greed_state": momentum.get("greed_state"),
+        "smart_money_dominant": smart.get("smart_money_dominant"),
+    }
+
+
+def _mark_institutional_flow_unavailable(reason, symbol=None):
+    now_ms = int(time.time() * 1000)
+    previous = DASHBOARD_STATE.get("institutional_flow")
+    previous = dict(previous) if isinstance(previous, dict) else {}
+    if previous.get("status") in {"VALID", "STALE"} and previous.get("last_valid_update_ms"):
+        previous.update({
+            "status": "STALE",
+            "last_attempt_ms": now_ms,
+            "reason": str(reason or "DATA_UNAVAILABLE"),
+        })
+        if symbol:
+            previous["last_attempt_symbol"] = str(symbol)
+    else:
+        previous = {
+            "status": "DATA_UNAVAILABLE",
+            "source": "BINGX_CLOSED_OHLCV",
+            "source_symbol": str(symbol or DEFAULT_SYMBOL),
+            "source_timeframe": str(INTERVAL),
+            "source_candle_timestamp_ms": None,
+            "last_valid_update_ms": None,
+            "last_attempt_ms": now_ms,
+            "reason": str(reason or "DATA_UNAVAILABLE"),
+            "banker_pressure": None, "retailer_pressure": None, "hot_money": None,
+            "institutional_bias": None, "institutional_bias_detailed": None,
+            "flow_alignment": None, "distribution_risk": None,
+            "momentum_health": None, "continuation_strength": None,
+            "exhaustion_risk": None, "climax_risk": None,
+            "greed_state": None, "smart_money_dominant": None,
+        }
+    DASHBOARD_STATE["institutional_flow"] = previous
+    return previous
+
+
+def _analyze_institutional_flow_frame(frame, symbol):
+    closed = closed_ohlcv_frame(frame, INTERVAL)
+    if closed is None or not validate_dataframe(closed, 80):
+        return None
+    smart = SmartMoneyEngine.analyze_smart_money(closed)
+    momentum = MomentumFlowEngine.analyze_momentum_flow(closed)
+    return _build_institutional_flow_snapshot(smart, momentum, symbol, closed)
+
+
 def update_institutional_flow_scanner():
     if _discovery_paused():
         return False
     try:
         df = get_ohlcv_safe(DEFAULT_SYMBOL, 100)
-        if df is None or not validate_dataframe(df, 80):
-            log_execution("[SCANNER] No valid data for institutional flow update, using defaults", "WARN")
-            DASHBOARD_STATE["institutional_flow"] = {
-                "banker_pressure": 50.0, "retailer_pressure": 50.0, "hot_money": 50.0,
-                "institutional_bias": "NEUTRAL", "institutional_bias_detailed": "NEUTRAL",
-                "flow_alignment": 25.0, "distribution_risk": 0.0,
-                "momentum_health": 50.0, "continuation_strength": 0.0, "exhaustion_risk": 0.0,
-                "climax_risk": 0.0, "greed_state": False, "smart_money_dominant": False
-            }
-            return
-        smart = SmartMoneyEngine.analyze_smart_money(df)
-        mom = MomentumFlowEngine.analyze_momentum_flow(df)
-        DASHBOARD_STATE["institutional_flow"] = {
-            "banker_pressure": smart["banker_pressure"],
-            "retailer_pressure": smart["retailer_pressure"],
-            "hot_money": smart["hot_money_pressure"],
-            "institutional_bias": smart["institutional_bias"],
-            "institutional_bias_detailed": smart.get("institutional_bias_detailed", "NEUTRAL"),
-            "flow_alignment": smart["flow_alignment"],
-            "distribution_risk": smart["distribution_risk"],
-            "momentum_health": mom["momentum_health"],
-            "continuation_strength": mom["continuation_strength"],
-            "exhaustion_risk": mom["exhaustion_risk"],
-            "climax_risk": mom["climax_risk"],
-            "greed_state": mom["greed_state"],
-            "smart_money_dominant": smart["smart_money_dominant"]
-        }
+        snapshot = _analyze_institutional_flow_frame(df, DEFAULT_SYMBOL) if df is not None else None
+        if snapshot is None:
+            _mark_institutional_flow_unavailable("OHLCV_UNAVAILABLE_OR_INSUFFICIENT_CLOSED_CANDLES", DEFAULT_SYMBOL)
+            log_execution("[SCANNER] Institutional flow unavailable; no synthetic defaults published", "WARN",
+                          debounce_key="institutional_flow_unavailable", debounce_sec=60)
+            return False
+        DASHBOARD_STATE["institutional_flow"] = snapshot
         DASHBOARD_STATE["last_live_refresh"] = time.time()
-        log_execution(f"[SCANNER] Institutional flow updated: bias={smart['institutional_bias_detailed']}, dominance={smart['smart_money_dominant']}", "INFO")
-    except Exception as e:
-        log_execution(f"[SCANNER] Error updating institutional flow: {e}", "ERROR")
+        log_execution(
+            f"[SCANNER] Institutional flow updated: bias={snapshot.get('institutional_bias_detailed')}, "
+            f"dominance={snapshot.get('smart_money_dominant')}",
+            "INFO",
+        )
+        return True
+    except Exception as exc:
+        _mark_institutional_flow_unavailable(f"{type(exc).__name__}:{str(exc)[:120]}", DEFAULT_SYMBOL)
+        log_execution(f"[SCANNER] Error updating institutional flow: {exc}", "ERROR")
+        return False
+
 
 # ========== LIVE INSTITUTIONAL UPDATER THREAD (PAUSED DURING TRADE) ==========
 def live_institutional_updater():
     while True:
         try:
-            # Do not run during open trade to avoid duplicate API calls and thread contention
+            # Do not run during open trade to avoid duplicate API calls and thread contention.
             if _discovery_paused():
                 time.sleep(5)
                 continue
             symbol = DEFAULT_SYMBOL
             df = get_ohlcv_safe(symbol, 100)
-            if not _discovery_paused() and df is not None and validate_dataframe(df, 80):
-                smart = SmartMoneyEngine.analyze_smart_money(df)
-                mom = MomentumFlowEngine.analyze_momentum_flow(df)
+            snapshot = _analyze_institutional_flow_frame(df, symbol) if df is not None else None
+            if not _discovery_paused() and snapshot is not None:
                 with _TRADE_LOCK:
-                    DASHBOARD_STATE["institutional_flow"] = {
-                        "banker_pressure": smart["banker_pressure"],
-                        "retailer_pressure": smart["retailer_pressure"],
-                        "hot_money": smart["hot_money_pressure"],
-                        "institutional_bias": smart["institutional_bias"],
-                        "institutional_bias_detailed": smart.get("institutional_bias_detailed", "NEUTRAL"),
-                        "flow_alignment": smart["flow_alignment"],
-                        "distribution_risk": smart["distribution_risk"],
-                        "momentum_health": mom["momentum_health"],
-                        "continuation_strength": mom["continuation_strength"],
-                        "exhaustion_risk": mom["exhaustion_risk"],
-                        "climax_risk": mom["climax_risk"],
-                        "greed_state": mom["greed_state"],
-                        "smart_money_dominant": smart["smart_money_dominant"]
-                    }
-                DASHBOARD_STATE["last_live_refresh"] = time.time()
-            else:
-                update_institutional_flow_scanner()
-        except Exception as e:
-            log_execution(f"[LIVE_UPDATER] Error: {e}", "ERROR")
+                    DASHBOARD_STATE["institutional_flow"] = snapshot
+                    DASHBOARD_STATE["last_live_refresh"] = time.time()
+            elif not _discovery_paused():
+                # Do not issue a second OHLCV request on the same failed updater cycle.
+                _mark_institutional_flow_unavailable("OHLCV_UNAVAILABLE_OR_INSUFFICIENT_CLOSED_CANDLES", symbol)
+        except Exception as exc:
+            _mark_institutional_flow_unavailable(f"{type(exc).__name__}:{str(exc)[:120]}", DEFAULT_SYMBOL)
+            log_execution(f"[LIVE_UPDATER] Error: {exc}", "ERROR")
         time.sleep(5)
 
 # ========== MAIN LOOP ==========
