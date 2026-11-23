@@ -2024,7 +2024,12 @@ def validate_ema915_vwap_location_first_entry_gate(
         close = closed["close"].astype(float)
         ema9 = pd.Series(ema_fn(close, 9), index=closed.index, dtype=float)
         ema15 = pd.Series(ema_fn(close, 15), index=closed.index, dtype=float)
-        ema50 = pd.Series(ema_fn(close, 50), index=closed.index, dtype=float)
+        try:
+            ema50 = pd.Series(ema_fn(close, 50), index=closed.index, dtype=float)
+        except Exception:
+            # EMA50 is an optional macro-pullback zone; its absence must not
+            # disable the primary EMA9/EMA15 + VWAP micro-retest strategy.
+            ema50 = pd.Series(np.nan, index=closed.index, dtype=float)
         tr = pd.concat([
             (closed["high"] - closed["low"]).rename("hl"),
             (closed["high"] - closed["close"].shift(1)).abs().rename("hc"),
@@ -2032,7 +2037,8 @@ def validate_ema915_vwap_location_first_entry_gate(
         ], axis=1).max(axis=1)
         atr = float(tr.rolling(14, min_periods=14).mean().iloc[-1])
         e9_now, e15_now, vwap_now = float(ema9.iloc[-1]), float(ema15.iloc[-1]), float(vwap.iloc[-1])
-        e50_now = float(ema50.iloc[-1]) if np.isfinite(float(ema50.iloc[-1])) else None
+        e50_raw = float(ema50.iloc[-1])
+        e50_now = e50_raw if np.isfinite(e50_raw) else None
     except Exception as exc:
         result["reason"] = f"indicator_calculation_failed:{type(exc).__name__}"
         return result
@@ -2105,7 +2111,8 @@ def validate_ema915_vwap_location_first_entry_gate(
             candle_low <= band_high + 0.15 * atr
             and candle_high >= band_low - 0.15 * atr
         )
-        e50_value = float(ema50.iloc[idx]) if np.isfinite(float(ema50.iloc[idx])) else None
+        e50_raw = float(ema50.iloc[idx])
+        e50_value = e50_raw if np.isfinite(e50_raw) else None
         macro_touch = (
             e50_value is not None
             and candle_low <= e50_value + 0.15 * atr

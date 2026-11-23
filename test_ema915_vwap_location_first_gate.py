@@ -176,3 +176,27 @@ def test_macro_pullback_can_retest_ema50_after_the_primary_cross(monkeypatch):
     assert result["macro_pullback_touch"] is True
     assert result["entry_mode"] == "MACRO_PULLBACK_REJECTION_BREAK"
     assert result["entry_zone_high"] < 100.0
+
+
+def test_micro_retest_remains_available_when_ema50_is_unavailable(monkeypatch):
+    base_ema = _ema("BUY")
+
+    def no_ema50(values, period):
+        if period == 50:
+            raise ValueError("EMA50 unavailable")
+        return base_ema(values, period)
+
+    frame = _market("BUY")
+    monkeypatch.setattr(
+        confluence, "compute_session_vwap",
+        lambda closed, timeframe_seconds, now_ms=None: pd.Series(100.0, index=closed.index, dtype=float),
+    )
+    result = confluence.validate_ema915_vwap_location_first_entry_gate(
+        frame, "BUY", no_ema50, timeframe_seconds=900,
+        now_ms=int(frame.timestamp.iloc[-1] + 901_000), current_price=101.3,
+        max_cross_age_bars=8, pullback_lookback_bars=5, max_extension_atr=1.5,
+        location_context={}, target_price=102.0,
+    )
+    assert result["ready"] is True
+    assert result["pullback_type"] == "MICRO_RETEST"
+    assert result["ema50"] is None
