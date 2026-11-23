@@ -344,9 +344,15 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                     continue
                 active_side = str(strategy.get("active_side") or "").upper()
                 active_stage = str(strategy.get("stage") or "").upper()
-                observed_at = float(item.get("updated_at") or strategy.get("observed_at") or 0.0)
-                timeframe_seconds = max(1.0, float(item.get("timeframe_seconds") or strategy.get("timeframe_seconds") or 900.0))
-                age_seconds = max(0.0, time.time() - observed_at) if observed_at > 0 else float("inf")
+                try:
+                    observed_at = float(item.get("updated_at") or strategy.get("observed_at") or 0.0)
+                    timeframe_seconds = float(item.get("timeframe_seconds") or strategy.get("timeframe_seconds") or 900.0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not (math.isfinite(observed_at) and math.isfinite(timeframe_seconds) and timeframe_seconds > 0):
+                    continue
+                age_seconds = time.time() - observed_at
+                max_observation_age = max(2.0 * timeframe_seconds, 1800.0)
                 allowed_stages = {
                     "WAITING_FOR_PULLBACK", "WAITING_FOR_REJECTION",
                     "WAITING_FOR_CONTINUATION_BREAK", "WAITING_FOR_RECLAIM",
@@ -359,7 +365,8 @@ def merge_candidates(memory: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                     or item.get("cross_fresh") is not True
                     or str(item.get("data_quality") or "").upper() != "CLOSED_CANDLES"
                     or observed_at <= 0
-                    or age_seconds > max(2.0 * timeframe_seconds, 1800.0)
+                    or age_seconds < -30.0
+                    or age_seconds > max_observation_age
                 ):
                     continue
             original = str(item["symbol"]).strip()
