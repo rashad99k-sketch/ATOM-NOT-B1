@@ -54,3 +54,8 @@ def test_institutional_flow_has_one_configurable_slow_polling_worker():
     assert "INSTITUTIONAL_FLOW_REFRESH_SECONDS" in names
     assert 5 in constants  # short sleep only while a position is open
     assert 'INSTITUTIONAL_FLOW_REFRESH_SECONDS = _env_int_range("INSTITUTIONAL_FLOW_REFRESH_SECONDS", 60, 30, 300)' in SOURCE
+
+def test_runtime_diagnostics_exposes_candidate_worker_stage():
+    node = _last_function("runtime_diagnostics")
+    segment = ast.get_source_segment(SOURCE, node)
+    assert '"candidate_pipeline": dict(MEMORY.get("candidate_pipeline") or {})' in segment
