@@ -1105,6 +1105,21 @@ def validate_ema915_vwap_pullback_entry_gate(
                     and candle_close < e50_at_rejection - 0.05 * atr
                     and upper_wick_ratio >= 0.10
                 )
+        elif pullback_type == "RETEST":
+            if direction == "BUY":
+                rejection = (
+                    candle_close > candle_open
+                    and candle_close > float(previous["close"])
+                    and candle_close > macro_zone_high + 0.05 * atr
+                    and lower_wick_ratio >= 0.10
+                )
+            else:
+                rejection = (
+                    candle_close < candle_open
+                    and candle_close < float(previous["close"])
+                    and candle_close < macro_zone_low - 0.05 * atr
+                    and upper_wick_ratio >= 0.10
+                )
         elif direction == "BUY":
             rejection = (candle_close > candle_open and candle_close > float(previous["close"])
                          and candle_close > e9_at_rejection and lower_wick_ratio >= 0.10)
@@ -1213,11 +1228,15 @@ def validate_ema915_vwap_pullback_entry_gate(
         "reason": (
             "ema915_vwap_macro_pullback_rejection_then_quality_breakout_confirmed"
             if pullback_type == "MACRO_PULLBACK"
+            else "ema915_vwap_institutional_retest_rejection_then_quality_breakout_confirmed"
+            if pullback_type == "RETEST"
             else "ema915_cross_vwap_pullback_rejection_then_quality_breakout_confirmed"
         ),
         "authorization_state": (
             "EMA915_VWAP_MACRO_PULLBACK_VALID"
             if pullback_type == "MACRO_PULLBACK"
+            else "EMA915_VWAP_RETEST_VALID"
+            if pullback_type == "RETEST"
             else "EMA915_VWAP_PULLBACK_VALID"
         ),
         "cross_direction": cross_direction, "ema9_cross": cross_direction,
