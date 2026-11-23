@@ -293,6 +293,24 @@ def _decision_priority(result: Dict[str, Any]) -> Tuple[int, float, float]:
         zone_score = 0.0
     return priority, score, zone_score
 
+def _strategy_authority_fields(adaptive_gate: Any) -> Dict[str, Any]:
+    """Project the EMA/VWAP lifecycle separately from institutional diagnostics.
+
+    Institutional analysis supplies location/liquidity evidence; it does not
+    decide whether the EMA/VWAP setup itself has completed. This projection is
+    deliberately pure so the selector and tests can distinguish those states.
+    """
+    gate = adaptive_gate if isinstance(adaptive_gate, dict) else {}
+    gate_state = str(gate.get("decision_state") or "WAITING_FOR_CONFIRMATION").upper()
+    ready = gate.get("ready") is True and gate_state == "ENTRY_READY"
+    return {
+        "strategy_state": "ENTRY_READY" if ready else gate_state,
+        "strategy_ready": bool(ready),
+        # This module analyzes and qualifies; the exchange gateway authorizes.
+        "entry_authorized": False,
+    }
+
+
 def _normalize_text_items(value: Any) -> List[str]:
     """Flatten tuple/list evidence and coerce every leaf to text at the API boundary."""
     normalized: List[str] = []
@@ -884,6 +902,17 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "decision_setup_type": decision.setup_type, "decision_state": decision.state,
         "decision_reason": decision.reason, "evidence": d.get("evidence", []),
         "adaptive_entry_gate": dict(adaptive_gate),
+        **_strategy_authority_fields(adaptive_gate),
+        "institutional_location_context": {
+            "liquidity": {"event": liq_name, "direction": liq_direction,
+                          "level": getattr(liq, "level", None),
+                          "confidence": getattr(liq, "confidence", 0),
+                          "reasons": list(getattr(liq, "reasons", []))},
+            "order_block": ob, "fvg": fvg,
+            "support_resistance": context.get("support_resistance", {}),
+            "golden_zone": golden,
+            "diagnostics_available": bool(institutional_diagnostics_available),
+        },
         "adaptive_entry_location_source": adaptive_zone_source,
         "adaptive_entry_location_timestamp": adaptive_zone_available_ts,
         "rejection_reasons": d.get("rejection_reasons", []), "event_id": decision.event_id,
