@@ -923,7 +923,7 @@ def validate_ema915_vwap_pullback_entry_gate(
             "cross_age_bars": cross_age_bars,
             "signal_candle_timestamp": signal_ts,
             "signal_candle_id": f"{direction}:EMA915_REVERSAL:{cross_ts}:SWEEP:{sweep_timestamp}:EVENT:{event_fragment}:TRIGGER:{signal_ts}",
-            "ema9": e9_now, "ema15": e15_now, "ema50": e50_now, "vwap": vwap_now, "atr": atr,
+            "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
             "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
             "institutional_origin_timestamp": sweep_timestamp,
             "liquidity_sweep_confirmed": True,
@@ -2046,7 +2046,7 @@ def validate_ema915_vwap_location_first_entry_gate(
         result["reason"] = "indicator_or_atr_unavailable"
         return result
     result.update({
-        "ema9": e9_now, "ema15": e15_now, "vwap": vwap_now, "atr": atr,
+        "ema9": e9_now, "ema15": e15_now, "ema50": e50_now, "vwap": vwap_now, "atr": atr,
         "latest_closed_timestamp": latest_ts, "data_age_seconds": data_age,
         "closed_candle_count": int(len(closed)),
     })

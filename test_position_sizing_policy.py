@@ -241,8 +241,14 @@ def _run_execute_entry(monkeypatch, *, side, balance, price=0.06, stop_pct=0.05)
         "latest_closed_timestamp": ts[-1],
         "cross_age_bars": 2,
     }
+    approved_gate.update({
+        "trigger": "EMA9_EMA15_SESSION_VWAP_LOCATION_FIRST",
+        "entry_mode": "PULLBACK_RETEST_REJECTION_BREAK",
+        "pullback_type": "MICRO_RETEST",
+    })
+    monkeypatch.setattr(ggpbot, "_INSTITUTIONAL_ENTRY_CONTEXT", None)
     monkeypatch.setattr(
-        ggpbot, "_validate_adaptive_ema9_vwap_entry_gate",
+        ggpbot, "_validate_ema915_vwap_location_first_entry_gate",
         lambda *a, **k: dict(approved_gate),
     )
     monkeypatch.setattr(ggpbot, "get_ticker_safe", lambda *a, **k: price)

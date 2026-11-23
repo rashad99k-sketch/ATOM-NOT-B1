@@ -127,7 +127,14 @@ def test_watchlist_priority_prefers_actual_golden_zone_and_retest_state(tmp_path
     # Only the first item in the rotation batch is analyzed. Structural proximity
     # and a real pending retest must outrank a larger raw discovery score.
     seen = []
-    out = bridge.update_unified_watchlist(memory, lambda symbol: seen.append(symbol) or frame(),
+    fresh_frame = frame()
+    now_ms = int(__import__("time").time() * 1000)
+    current_open = (now_ms // 900_000) * 900_000
+    fresh_frame["timestamp"] = [
+        current_open - (len(fresh_frame) - idx) * 900_000
+        for idx in range(len(fresh_frame))
+    ]
+    out = bridge.update_unified_watchlist(memory, lambda symbol: seen.append(symbol) or fresh_frame.copy(),
                                           max_items=10, batch_size=1)
     assert seen == ["BBB/USDT:USDT"]
     assert "BBB" in out
