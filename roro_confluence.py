@@ -998,18 +998,19 @@ def validate_ema915_vwap_pullback_entry_gate(
                 "causal_zone_confirmed": True,
             })
             return result
-        if bos_confirmed and extension > min(1.0, max(0.1, float(max_extension_atr))):
-            result.update({
-                "reason": "entry_window_missed_no_chase",
-                "entry_mode": "NO_CHASE",
-                "decision_state": "NO_CHASE",
-                "cross_direction": cross_direction,
-                "cross_timestamp": cross_ts,
+        impulse_no_chase = bool(
+            bos_confirmed
+            and extension > min(1.0, max(0.1, float(max_extension_atr)))
+        )
+        if impulse_no_chase:
+            # Do not authorize the late impulse, but continue evaluating the
+            # existing fresh pullback/retest path. A later valid retest may
+            # provide a new bounded entry opportunity; no chase is permitted.
+            result["impulse_no_chase_context"] = {
                 "bos_confirmed": True,
                 "bos_level": bos_level,
                 "extension_atr": extension,
-            })
-            return result
+            }
 
     # Reversal setups use the crossover as the analysis trigger, then rely on
     # the existing institutional authority's sweep -> reclaim -> MSS -> retest
@@ -1321,11 +1322,21 @@ def validate_ema915_vwap_pullback_entry_gate(
             rejection_idx = idx
 
     if rejection_idx is None:
-        result.update({"reason": "waiting_for_directional_rejection",
-                       "entry_mode": pullback_type, "pullback_type": pullback_type,
-                       "macro_pullback": pullback_type == "MACRO_PULLBACK",
-                       "cross_direction": cross_direction, "cross_timestamp": cross_ts,
-                       "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx])})
+        if result.get("impulse_no_chase_context"):
+            result.update({
+                "reason": "entry_window_missed_no_chase",
+                "entry_mode": "NO_CHASE",
+                "decision_state": "NO_CHASE",
+                "cross_direction": cross_direction,
+                "cross_timestamp": cross_ts,
+                **result["impulse_no_chase_context"],
+            })
+        else:
+            result.update({"reason": "waiting_for_directional_rejection",
+                           "entry_mode": pullback_type, "pullback_type": pullback_type,
+                           "macro_pullback": pullback_type == "MACRO_PULLBACK",
+                           "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+                           "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx])})
         return result
 
     rejection_candle = closed.iloc[rejection_idx]

@@ -158,7 +158,7 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
     assert result["reason"] == "institutional_sweep_timestamp_unavailable"
 
 
-def _impulse_frame(side="BUY", monkeypatch=None):
+def _impulse_frame(side, monkeypatch):
     import numpy as np
     import roro_confluence as confluence
 
@@ -222,7 +222,8 @@ def test_continuation_allows_qualified_bullish_impulse_without_pullback(monkeypa
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=101.8, entry_zone_high=102.2,
+        entry_zone_low=float(frame.close.iloc[-1]) - 0.10,
+        entry_zone_high=float(frame.close.iloc[-1]) + 0.10,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is True, result
@@ -237,7 +238,8 @@ def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypa
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "SELL", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=97.8, entry_zone_high=98.2,
+        entry_zone_low=float(frame.close.iloc[-1]) - 0.10,
+        entry_zone_high=float(frame.close.iloc[-1]) + 0.10,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is True, result
@@ -247,20 +249,21 @@ def test_continuation_allows_qualified_bearish_impulse_without_pullback(monkeypa
 
 
 
-def test_impulse_requires_all_three_quality_confirmations_and_bos():
-    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
+def test_impulse_requires_all_three_quality_confirmations_and_bos(monkeypatch):
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY", monkeypatch)
     frame.loc[len(frame)-1, "volume"] = 100.0
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_low=float(frame.close.iloc[-1]) - 0.10,
+        entry_zone_high=float(frame.close.iloc[-1]) + 0.10,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is False
 
 
-def test_impulse_no_chase_never_authorizes_late_price():
-    frame, now_ms, live, impulse_ema = _impulse_frame("BUY")
+def test_impulse_no_chase_never_authorizes_late_price(monkeypatch):
+    frame, now_ms, live, impulse_ema = _impulse_frame("BUY", monkeypatch)
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live + 3.0, setup_mode="TREND_CONTINUATION_ENGINE",
