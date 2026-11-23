@@ -112,3 +112,16 @@ def test_scanner_snapshot_uses_only_defined_adaptive_side_map_and_progress_map()
     assert '"MACRO_PULLBACK_READY"' in source
     assert '"WAITING_FOR_CONTINUATION_BREAK"' in source
     assert '"EMA9_EMA15_SESSION_VWAP_PULLBACK"' in source
+
+
+def test_institutional_diagnostic_failure_does_not_veto_valid_ema_vwap_entry(monkeypatch):
+    _patch_common(monkeypatch, _ready_gate())
+    monkeypatch.setattr(bridge, "_build_context", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("context offline")))
+    monkeypatch.setattr(bridge.REVERSAL, "analyze", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("reversal offline")))
+    monkeypatch.setattr(bridge.CONTINUATION, "analyze", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("continuation offline")))
+    monkeypatch.setattr(bridge.AUTHORITY, "decide", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("authority offline")))
+    result = bridge.analyze_symbol("BTC/USDT:USDT", "BUY", _frame(), now_ms=1795204801000)
+    assert result["decision_state"] == "ENTRY_READY"
+    assert result["institutional_diagnostics_available"] is False
+    assert result["adaptive_entry_gate"]["location_status"] == "UNKNOWN_NON_BLOCKING"
+    assert result["structural_stop"] < result["price"]

@@ -587,18 +587,27 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             "volume_ratio": 0.0, "volume_confirmed": False,
             "golden_zone": {"state": "UNKNOWN", "score": 0.0},
         }
-    context.setdefault("regime", SimpleNamespace(state="UNKNOWN", direction="NEUTRAL"))
-    context.setdefault("structure", {"confirmed": False, "direction": "UNKNOWN", "bos": None,
-                                     "mss": None, "swing_high": None, "swing_low": None})
-    context.setdefault("liquidity", SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
-                                                    confidence=0.0, reasons=[]))
+    if context.get("regime") is None:
+        context["regime"] = SimpleNamespace(state="UNKNOWN", direction="NEUTRAL")
+    elif isinstance(context.get("regime"), dict):
+        context["regime"] = SimpleNamespace(**context["regime"])
+    if not isinstance(context.get("structure"), dict):
+        context["structure"] = {"confirmed": False, "direction": "UNKNOWN", "bos": None,
+                                "mss": None, "swing_high": None, "swing_low": None}
+    if context.get("liquidity") is None:
+        context["liquidity"] = SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
+                                               confidence=0.0, reasons=[])
+    elif isinstance(context.get("liquidity"), dict):
+        context["liquidity"] = SimpleNamespace(**context["liquidity"])
     context.setdefault("order_block", None)
     context.setdefault("fvg", None)
-    context.setdefault("support_resistance", {"status": "UNKNOWN", "supports": [], "resistances": []})
+    if not isinstance(context.get("support_resistance"), dict):
+        context["support_resistance"] = {"status": "UNKNOWN", "supports": [], "resistances": []}
     context.setdefault("support_resistance_aligned", False)
     context.setdefault("volume_ratio", 0.0)
     context.setdefault("volume_confirmed", False)
-    context.setdefault("golden_zone", {"state": "UNKNOWN", "score": 0.0})
+    if not isinstance(context.get("golden_zone"), dict):
+        context["golden_zone"] = {"state": "UNKNOWN", "score": 0.0}
     try:
         if not (np.isfinite(float(context.get("atr") or 0)) and float(context.get("atr") or 0) > 0):
             context["atr"] = float(_atr(closed))
@@ -606,6 +615,26 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             context["price"] = float(closed.close.iloc[-1])
     except Exception as context_value_exc:
         diagnostics_errors.append(f"context_values:{type(context_value_exc).__name__}")
+    try:
+        if not (np.isfinite(float(context.get("atr") or 0)) and float(context.get("atr") or 0) > 0
+                and np.isfinite(float(context.get("price") or 0)) and float(context.get("price") or 0) > 0):
+            return {
+                "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+                "decision_state": DecisionState.REJECTED.value,
+                "decision_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+                "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+            }
+    except Exception:
+        return {
+            "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+            "decision_state": DecisionState.REJECTED.value,
+            "decision_reason": "institutional_context_failed_and_atr_unavailable",
+            "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+            "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+            "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+        }
     try:
         rev = REVERSAL.analyze(symbol, side, closed, context=context)
     except Exception as rev_exc:
