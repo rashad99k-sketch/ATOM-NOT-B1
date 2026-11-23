@@ -156,3 +156,76 @@ def test_reversal_fails_closed_without_a_known_sweep_timestamp():
     )
     assert result["ready"] is False
     assert result["reason"] == "institutional_sweep_timestamp_unavailable"
+
+
+def _impulse_frame(side="BUY"):
+    frame, now_ms = _cross_frame()
+    # Keep the crossover event fresh, then create a distinct quality BOS candle.
+    # The candle closes beyond the preceding 10-candle swing with high volume.
+    direction = 1.0 if side == "BUY" else -1.0
+    prior = frame.iloc[-11:-1]
+    level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
+    open_price = level - 1.00 * direction
+    close_price = level + 1.00 * direction
+    low = min(open_price, close_price) - 0.05
+    high = max(open_price, close_price) + 0.05
+    frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
+        open_price, high, low, close_price, 300.0
+    ]
+    # Move current price modestly beyond the signal close without chasing.
+    live = close_price + 0.05 * direction
+    return frame, int(frame.timestamp.iloc[-1] + 901_000), live
+
+
+def test_continuation_allows_qualified_bullish_impulse_without_pullback():
+    frame, now_ms, live = _impulse_frame("BUY")
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
+        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
+    )
+    assert result["ready"] is True
+    assert result["entry_mode"] == "IMPULSE_ENTRY"
+    assert result["authorization_state"] == "EMA915_VWAP_IMPULSE_VALID"
+    assert result["bos_confirmed"] is True
+    assert result["causal_zone_confirmed"] is True
+
+
+def test_continuation_allows_qualified_bearish_impulse_without_pullback():
+    frame, now_ms, live = _impulse_frame("SELL")
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "SELL", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
+        entry_zone_low=99.0, entry_zone_high=100.2,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
+    )
+    assert result["ready"] is True
+    assert result["entry_mode"] == "IMPULSE_ENTRY"
+    assert result["authorization_state"] == "EMA915_VWAP_IMPULSE_VALID"
+    assert result["bos_confirmed"] is True
+
+
+def test_impulse_requires_all_three_quality_confirmations_and_bos():
+    frame, now_ms, live = _impulse_frame("BUY")
+    frame.loc[len(frame)-1, "volume"] = 100.0
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=live, setup_mode="TREND_CONTINUATION_ENGINE",
+        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
+    )
+    assert result["ready"] is False
+
+
+def test_impulse_no_chase_never_authorizes_late_price():
+    frame, now_ms, live = _impulse_frame("BUY")
+    result = validate_ema915_vwap_pullback_entry_gate(
+        frame, "BUY", _ema, timeframe_seconds=900, now_ms=now_ms,
+        current_price=live + 3.0, setup_mode="TREND_CONTINUATION_ENGINE",
+        entry_zone_low=99.8, entry_zone_high=101.0,
+        entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
+    )
+    assert result["ready"] is False
+    assert result["reason"] == "entry_window_missed_no_chase"
+    assert result["entry_mode"] == "NO_CHASE"

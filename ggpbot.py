@@ -6646,9 +6646,8 @@ def execute_entry(side, symbol, price, sl, tp1, tp2, score, reason, atr_val, tra
         return False
     trade_id = uuid.uuid4().hex
     institutional_entry_ctx = globals().get("_INSTITUTIONAL_ENTRY_CONTEXT") or {}
-    # EMA9/EMA15 cross starts this adaptive lane; Session VWAP is directional
-    # context. The gate requires a micro pullback, causal-zone retest, or EMA50
-    # macro pullback, followed by a separate rejection and quality break.
+    # EMA9/EMA15 cross starts this lane. The unified gate may qualify a strict
+    # closed-candle impulse BOS, or the existing pullback/retest paths.
     gate_setup_type = str(institutional_entry_ctx.get("setup_type") or "").strip().upper()
     gate_setup_mode = gate_setup_type if "REVERSAL" in gate_setup_type else "CONTINUATION"
     gate_evidence = list(institutional_entry_ctx.get("evidence") or [])

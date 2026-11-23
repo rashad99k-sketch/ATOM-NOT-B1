@@ -849,6 +849,165 @@ def validate_ema915_vwap_pullback_entry_gate(
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
+    # A qualified displacement breakout may enter without waiting for a
+    # pullback. This is deliberately stricter than a large candle: BOS must be
+    # confirmed on a closed candle, the current trend/VWAP relationship must
+    # remain aligned, volume and candle quality must agree, and the live price
+    # must still be close enough to EMA9 to avoid chasing.
+    if not is_reversal_setup:
+        impulse_idx = len(closed) - 1
+        impulse_candle = closed.iloc[impulse_idx]
+        impulse_open = float(impulse_candle["open"])
+        impulse_high = float(impulse_candle["high"])
+        impulse_low = float(impulse_candle["low"])
+        impulse_close = float(impulse_candle["close"])
+        impulse_range = impulse_high - impulse_low
+        impulse_body = abs(impulse_close - impulse_open)
+        impulse_body_atr = impulse_body / atr if atr > 0 else 0.0
+        impulse_range_atr = impulse_range / atr if atr > 0 else 0.0
+        impulse_body_ratio = impulse_body / impulse_range if impulse_range > 0 else 0.0
+        impulse_close_position = (
+            (impulse_close - impulse_low) / impulse_range
+            if impulse_range > 0 else 0.5
+        )
+        directional_candle = (
+            impulse_close > impulse_open and impulse_close_position >= 0.78
+            if direction == "BUY"
+            else impulse_close < impulse_open and impulse_close_position <= 0.22
+        )
+        volume_values = closed["volume"].astype(float)
+        volume_base = (
+            float(volume_values.iloc[-21:-1].mean())
+            if len(volume_values) >= 21 else 0.0
+        )
+        impulse_volume_ratio = (
+            float(volume_values.iloc[-1]) / volume_base
+            if volume_base > 0 else None
+        )
+        prior_start = max(0, impulse_idx - 10)
+        prior = closed.iloc[prior_start:impulse_idx]
+        bos_level = None
+        bos_confirmed = False
+        if len(prior) >= 5:
+            bos_level = (
+                float(prior["high"].max())
+                if direction == "BUY"
+                else float(prior["low"].min())
+            )
+            bos_confirmed = (
+                impulse_close > bos_level
+                if direction == "BUY"
+                else impulse_close < bos_level
+            )
+        impulse_displacement_ok = impulse_body_atr >= 0.80 and impulse_range_atr >= 1.20
+        impulse_volume_ok = (
+            impulse_volume_ratio is not None and impulse_volume_ratio >= 1.30
+        )
+        impulse_candle_ok = impulse_body_ratio >= 0.60 and directional_candle
+        impulse_checks = {
+            "volume_expansion": bool(impulse_volume_ok),
+            "displacement": bool(impulse_displacement_ok),
+            "candle_quality": bool(impulse_candle_ok),
+        }
+        impulse_score = sum(1 for value in impulse_checks.values() if value)
+        live_for_impulse = (
+            float(current_price) if current_price is not None else impulse_close
+        )
+        extension = (
+            (live_for_impulse - e9_now) if direction == "BUY"
+            else (e9_now - live_for_impulse)
+        ) / atr if atr > 0 else float("inf")
+        location_is_valid = (
+            entry_zone_low is not None and entry_zone_high is not None
+        )
+        try:
+            zone_low = float(entry_zone_low)
+            zone_high = float(entry_zone_high)
+            location_is_valid = (
+                location_is_valid
+                and np.isfinite(zone_low) and np.isfinite(zone_high)
+                and 0 < zone_low < zone_high
+            )
+        except (TypeError, ValueError, OverflowError):
+            location_is_valid = False
+            zone_low = zone_high = float("nan")
+        causal_location_ok = bool(
+            location_is_valid
+            and (
+                zone_low - 0.10 * atr <= impulse_close <= zone_high + 0.10 * atr
+                or zone_low - 0.10 * atr <= live_for_impulse <= zone_high + 0.10 * atr
+            )
+        )
+        impulse_context = {
+            "bos_confirmed": bool(bos_confirmed),
+            "bos_level": bos_level,
+            "displacement_atr": impulse_body_atr,
+            "range_atr": impulse_range_atr,
+            "body_ratio": impulse_body_ratio,
+            "close_position": impulse_close_position,
+            "volume_ratio": impulse_volume_ratio,
+            "supporting_checks": impulse_checks,
+            "supporting_score": impulse_score,
+            "extension_atr": extension,
+            "causal_location_valid": causal_location_ok,
+        }
+        result["impulse_context"] = impulse_context
+        # Three supporting quality checks are required; BOS, direction, VWAP,
+        # and causal location are mandatory independent conditions.
+        impulse_ready = (
+            cross_age_bars <= 2
+            and aligned
+            and bos_confirmed
+            and impulse_score >= 3
+            and causal_location_ok
+            and np.isfinite(live_for_impulse)
+            and live_for_impulse > 0
+            and -0.10 <= extension <= min(1.0, max(0.1, float(max_extension_atr)))
+            and (
+                (direction == "BUY" and live_for_impulse > vwap_now and impulse_close > vwap_now)
+                or (direction == "SELL" and live_for_impulse < vwap_now and impulse_close < vwap_now)
+            )
+        )
+        if impulse_ready:
+            impulse_ts = int(impulse_candle["timestamp"])
+            cross_event_id = (
+                f"{direction}:EMA915:{cross_ts}:IMPULSE:{impulse_ts}:BOS:{bos_level:.12g}"
+            )
+            result.update({
+                "ready": True,
+                "entry_mode": "IMPULSE_ENTRY",
+                "reason": "closed_bos_displacement_volume_and_causal_location_confirmed",
+                "authorization_state": "EMA915_VWAP_IMPULSE_VALID",
+                "cross_direction": cross_direction,
+                "cross_timestamp": cross_ts,
+                "signal_candle_timestamp": impulse_ts,
+                "signal_candle_id": cross_event_id,
+                "entry_price": live_for_impulse,
+                "extension_atr": extension,
+                "bos_confirmed": True,
+                "bos_level": bos_level,
+                "impulse_timestamp": impulse_ts,
+                "impulse_volume_ratio": impulse_volume_ratio,
+                "impulse_displacement_atr": impulse_body_atr,
+                "impulse_range_atr": impulse_range_atr,
+                "impulse_body_ratio": impulse_body_ratio,
+                "impulse_close_position": impulse_close_position,
+                "causal_zone_confirmed": True,
+            })
+            return result
+        if bos_confirmed and extension > min(1.0, max(0.1, float(max_extension_atr))):
+            result.update({
+                "reason": "entry_window_missed_no_chase",
+                "entry_mode": "NO_CHASE",
+                "decision_state": "NO_CHASE",
+                "cross_direction": cross_direction,
+                "cross_timestamp": cross_ts,
+                "bos_confirmed": True,
+                "bos_level": bos_level,
+                "extension_atr": extension,
+            })
+            return result
+
     # Reversal setups use the crossover as the analysis trigger, then rely on
     # the existing institutional authority's sweep -> reclaim -> MSS -> retest
     # evidence. They must not be forced through the continuation-only EMA-band

@@ -664,7 +664,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         if adaptive_stop is not None:
             adaptive_evidence = [
                 "ema9_ema15_cross_confirmed",
-                f"ema915_pullback_rejection_break:{adaptive_gate.get('entry_mode')}",
+                f"ema915_adaptive_confirmation:{adaptive_gate.get('entry_mode')}",
                 f"adaptive_entry:{adaptive_gate.get('entry_mode')}",
                 f"causal_zone:{adaptive_zone_source}",
                 "structure_confirmation:directional" if structure_confirmed else "liquidity_confirmation:directional_sweep",
