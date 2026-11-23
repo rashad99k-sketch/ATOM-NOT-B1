@@ -190,7 +190,19 @@ def test_stale_or_non_directional_ema915_scanner_rows_are_not_candidates():
         "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
         "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "ENTRY_WINDOW_MISSED"},
     }
+    malformed_timestamp = {
+        "symbol": "DOGE/USDT:USDT", "updated_at": "not-a-timestamp",
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "WAITING_FOR_PULLBACK"},
+    }
+    future_dated = {
+        "symbol": "XRP/USDT:USDT", "updated_at": time.time() + 3600,
+        "timeframe_seconds": 900, "cross_fresh": True, "data_quality": "CLOSED_CANDLES",
+        "ema9_vwap_adaptive_strategy": {"active_side": "BUY", "stage": "WAITING_FOR_PULLBACK"},
+    }
     merged = merge_candidates({
-        "ema9_vwap_proximity_scanner": [stale, no_cross, invalid_stage]
+        "ema9_vwap_proximity_scanner": [
+            stale, no_cross, invalid_stage, malformed_timestamp, future_dated
+        ]
     })
     assert merged == {}
