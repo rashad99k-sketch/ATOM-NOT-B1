@@ -595,15 +595,19 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     }
     adaptive_zone = None
     adaptive_zone_source = None
+    adaptive_zone_available_ts = None
     if ob_ok and isinstance(ob, dict):
         adaptive_zone = (float(ob.get("low", 0) or 0), float(ob.get("high", 0) or 0))
         adaptive_zone_source = "ORDER_BLOCK"
+        adaptive_zone_available_ts = ob.get("impulse_timestamp", ob.get("timestamp"))
     elif fvg_ok and isinstance(fvg, dict):
         adaptive_zone = (float(fvg.get("lower", 0) or 0), float(fvg.get("upper", 0) or 0))
         adaptive_zone_source = "FVG"
+        adaptive_zone_available_ts = fvg.get("timestamp")
     elif sr_aligned and isinstance(sr_aligned_zone, dict):
         adaptive_zone = (float(sr_aligned_zone.get("low", 0) or 0), float(sr_aligned_zone.get("high", 0) or 0))
         adaptive_zone_source = "SUPPORT" if side == "BUY" else "RESISTANCE"
+        adaptive_zone_available_ts = sr_aligned_zone.get("source_timestamp", sr_aligned_zone.get("timestamp"))
     if (adaptive_zone and not (0 < adaptive_zone[0] < adaptive_zone[1])):
         adaptive_zone = None
         adaptive_zone_source = None
@@ -629,6 +633,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
                 cross_lookback_candles=8, pullback_lookback_candles=5,
                 max_extension_atr=1.5, setup_mode="CONTINUATION",
                 entry_zone_low=adaptive_zone[0], entry_zone_high=adaptive_zone[1],
+                entry_zone_available_timestamp=adaptive_zone_available_ts,
             )
         except Exception as adaptive_exc:
             adaptive_gate = {
@@ -735,6 +740,7 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "decision_reason": decision.reason, "evidence": d.get("evidence", []),
         "adaptive_entry_gate": dict(adaptive_gate),
         "adaptive_entry_location_source": adaptive_zone_source,
+        "adaptive_entry_location_timestamp": adaptive_zone_available_ts,
         "rejection_reasons": d.get("rejection_reasons", []), "event_id": decision.event_id,
         "origin_timestamp": decision.origin_timestamp, "structural_stop": decision.structural_stop,
         "invalidation_level": decision.invalidation_level, "score": float(decision.score),
