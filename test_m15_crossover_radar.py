@@ -101,6 +101,26 @@ def test_recent_closed_cross_remains_visible_for_eight_closed_bars():
     assert result["entry_authorization"] is False
 
 
+def test_recent_closed_cross_at_exact_eight_bar_limit_is_still_visible():
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0] + [111.0] * 8
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+
+    result = evaluate_m15_radar("ETH/USDT", frame, now_ms=NOW)
+
+    assert result["crossover_status"] == "CROSS_CONFIRMED"
+    assert result["cross_age_bars"] == 8
+
+
+def test_recent_closed_cross_older_than_eight_bars_is_not_fresh():
+    closes = [110 - i * 0.25 for i in range(59)] + [110.0] + [111.0] * 9
+    frame = frame_from_closes(closes, NOW - len(closes) * 900_000)
+
+    result = evaluate_m15_radar("ETH/USDT", frame, now_ms=NOW)
+
+    assert result["crossover_status"] != "CROSS_CONFIRMED"
+    assert result["entry_authorization"] is False
+
+
 def test_watchlist_shared_frame_publishes_recent_cross_without_extra_fetch():
     from m15_watchlist_integration import process_m15_watchlist_frame
 
