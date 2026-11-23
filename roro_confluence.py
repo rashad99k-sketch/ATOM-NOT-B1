@@ -642,6 +642,8 @@ def validate_ema915_vwap_pullback_entry_gate(
     institutional_evidence: Optional[List[str]] = None,
     institutional_event_id: Optional[str] = None,
     institutional_origin_timestamp: Optional[int] = None,
+    entry_zone_low: Optional[float] = None,
+    entry_zone_high: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Validate a closed-candle EMA9/EMA15 cross with setup-specific confirmation.
 
@@ -664,6 +666,9 @@ def validate_ema915_vwap_pullback_entry_gate(
         "cross_direction": None, "cross_timestamp": None, "pullback_timestamp": None,
         "signal_candle_timestamp": None, "signal_candle_id": None,
         "atr": None, "pullback_touch": False, "continuation_break": False,
+        "entry_mode": "WAIT", "pullback_type": None, "macro_pullback": False,
+        "macro_ema50": None, "macro_pullback_depth_atr": None,
+        "protected_swing_level": None, "entry_zone_low": None, "entry_zone_high": None,
     }
     if direction not in {"BUY", "SELL"}:
         return result
@@ -685,6 +690,17 @@ def validate_ema915_vwap_pullback_entry_gate(
         ema15 = pd.Series(ema_fn(close, 15), index=closed.index, dtype=float)
         if len(ema9) != len(closed) or len(ema15) != len(closed):
             raise ValueError("EMA length mismatch")
+        # EMA20/EMA50 are macro-regime context only. Older injected test/legacy
+        # EMA providers may expose only EMA9/EMA15; that must not break the
+        # standard pullback path, but they cannot qualify a macro pullback.
+        ema20 = ema50 = None
+        try:
+            ema20 = pd.Series(ema_fn(close, 20), index=closed.index, dtype=float)
+            ema50 = pd.Series(ema_fn(close, 50), index=closed.index, dtype=float)
+            if len(ema20) != len(closed) or len(ema50) != len(closed):
+                ema20 = ema50 = None
+        except Exception:
+            ema20 = ema50 = None
         tr = pd.concat([
             (closed["high"] - closed["low"]).rename("hl"),
             (closed["high"] - closed["close"].shift(1)).abs().rename("hc"),
@@ -797,8 +813,36 @@ def validate_ema915_vwap_pullback_entry_gate(
         aligned = e9_now > e15_now and e9_now > vwap_now and latest_close > vwap_now
     else:
         aligned = e9_now < e15_now and e9_now < vwap_now and latest_close < vwap_now
-    if not aligned:
-        result.update({"reason": "ema915_or_vwap_direction_not_aligned",
+
+    # A macro pullback may trade below the fast EMA/VWAP during retracement,
+    # but only while the slower EMA20/EMA50 trend remains structurally aligned.
+    # The separate rejection + later continuation close must reclaim VWAP.
+    macro_trend_aligned = False
+    ema20_now = ema50_now = ema20_slope = ema50_slope = None
+    if ema20 is not None and ema50 is not None and len(closed) >= 55:
+        try:
+            ema20_now, ema50_now = float(ema20.iloc[-1]), float(ema50.iloc[-1])
+            ema20_slope = float(ema20.iloc[-1] - ema20.iloc[-4])
+            ema50_slope = float(ema50.iloc[-1] - ema50.iloc[-4])
+            if direction == "BUY":
+                macro_trend_aligned = (
+                    ema20_now > ema50_now and ema20_slope > 0.0
+                    and ema50_slope >= -0.05 * atr and e9_now > e15_now
+                )
+            else:
+                macro_trend_aligned = (
+                    ema20_now < ema50_now and ema20_slope < 0.0
+                    and ema50_slope <= 0.05 * atr and e9_now < e15_now
+                )
+        except (TypeError, ValueError, IndexError):
+            macro_trend_aligned = False
+    result.update({
+        "ema20": ema20_now, "ema50": ema50_now,
+        "ema20_slope": ema20_slope, "ema50_slope": ema50_slope,
+        "macro_trend_aligned": bool(macro_trend_aligned),
+    })
+    if not aligned and not macro_trend_aligned:
+        result.update({"reason": "ema915_vwap_or_macro_trend_not_aligned",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
@@ -867,7 +911,7 @@ def validate_ema915_vwap_pullback_entry_gate(
         signal_ts = latest_ts
         event_fragment = str(institutional_event_id or "").strip() or f"{cross_ts}:{signal_ts}"
         result.update({
-            "ready": True,
+            "ready": True, "entry_mode": "INSTITUTIONAL_REVERSAL",
             "reason": "ema915_cross_vwap_liquidity_sweep_reclaim_mss_retest_confirmed",
             "authorization_state": "EMA915_INSTITUTIONAL_REVERSAL_VALID",
             "setup_mode": setup_name,
@@ -889,29 +933,104 @@ def validate_ema915_vwap_pullback_entry_gate(
         })
         return result
 
-    # Continuation is a three-step, closed-candle sequence:
-    # (1) first EMA9/EMA15 band pullback after the cross,
-    # (2) a distinct directional rejection candle,
-    # (3) a later close beyond that rejection candle's extreme.
-    # A single candle may not satisfy both rejection and breakout.
+    # Continuation is a strict sequence: a cross starts the setup; a later
+    # pullback touches an actionable area; a separate rejection candle forms;
+    # only a still-later quality close beyond that rejection can authorize entry.
     pullback_idx = None
+    pullback_type = None
+    macro_zone_low = macro_zone_high = None
+    try:
+        zone_low_arg = float(entry_zone_low) if entry_zone_low is not None else float("nan")
+        zone_high_arg = float(entry_zone_high) if entry_zone_high is not None else float("nan")
+        if np.isfinite(zone_low_arg) and np.isfinite(zone_high_arg) and 0 < zone_low_arg < zone_high_arg:
+            macro_zone_low, macro_zone_high = zone_low_arg, zone_high_arg
+    except (TypeError, ValueError, OverflowError):
+        macro_zone_low = macro_zone_high = None
+    result.update({"entry_zone_low": macro_zone_low, "entry_zone_high": macro_zone_high})
     scan_start = max(cross_idx + 1, len(closed) - 1 - pullback_window)
-    for idx in range(scan_start, len(closed) - 1):
-        e9_i, e15_i = float(ema9.iloc[idx]), float(ema15.iloc[idx])
-        band_low, band_high = min(e9_i, e15_i), max(e9_i, e15_i)
-        candle_low, candle_high = float(closed["low"].iloc[idx]), float(closed["high"].iloc[idx])
-        candle_close = float(closed["close"].iloc[idx])
-        if direction == "BUY":
-            touched = candle_low <= band_high + 0.25 * atr and candle_low >= band_low - 0.35 * atr
-            held = candle_close >= band_low - 0.35 * atr
-        else:
-            touched = candle_high >= band_low - 0.25 * atr and candle_high <= band_high + 0.35 * atr
-            held = candle_close <= band_high + 0.35 * atr
-        if touched and held:
-            pullback_idx = idx
-            break
+
+    # Macro/deep pullback: require the validated OB/FVG/SR zone supplied by the
+    # institutional bridge, confluence with EMA50, and protection of the last
+    # confirmed pre-cross swing. EMA50 touch alone never grants an entry.
+    if macro_trend_aligned and macro_zone_low is not None and ema50 is not None:
+        prior_start = max(0, cross_idx - 30)
+        prior = closed.iloc[prior_start:cross_idx]
+        protected_swing = None
+        if len(prior) >= 5:
+            pivots = []
+            for p in range(2, len(prior) - 2):
+                if direction == "BUY":
+                    if (float(prior.low.iloc[p]) < float(prior.low.iloc[p-2:p].min())
+                            and float(prior.low.iloc[p]) <= float(prior.low.iloc[p+1:p+3].min())):
+                        pivots.append(float(prior.low.iloc[p]))
+                else:
+                    if (float(prior.high.iloc[p]) > float(prior.high.iloc[p-2:p].max())
+                            and float(prior.high.iloc[p]) >= float(prior.high.iloc[p+1:p+3].max())):
+                        pivots.append(float(prior.high.iloc[p]))
+            if pivots:
+                protected_swing = pivots[-1]
+            else:
+                protected_swing = float(prior.low.min()) if direction == "BUY" else float(prior.high.max())
+        if protected_swing is not None:
+            for idx in range(scan_start, len(closed) - 1):
+                candle = closed.iloc[idx]
+                candle_low, candle_high = float(candle.low), float(candle.high)
+                candle_close = float(candle.close)
+                ema50_i = float(ema50.iloc[idx])
+                zone_touch = (
+                    candle_low <= macro_zone_high + 0.10 * atr
+                    and candle_high >= macro_zone_low - 0.10 * atr
+                )
+                if direction == "BUY":
+                    ema50_touch = (
+                        candle_low <= ema50_i + 0.30 * atr
+                        and candle_low >= ema50_i - 0.60 * atr
+                        and candle_close >= ema50_i - 0.15 * atr
+                    )
+                    structure_protected = candle_low > protected_swing - 0.10 * atr
+                    impulse_extreme = float(closed.high.iloc[cross_idx:idx+1].max())
+                    depth_atr = (impulse_extreme - candle_low) / atr
+                else:
+                    ema50_touch = (
+                        candle_high >= ema50_i - 0.30 * atr
+                        and candle_high <= ema50_i + 0.60 * atr
+                        and candle_close <= ema50_i + 0.15 * atr
+                    )
+                    structure_protected = candle_high < protected_swing + 0.10 * atr
+                    impulse_extreme = float(closed.low.iloc[cross_idx:idx+1].min())
+                    depth_atr = (candle_high - impulse_extreme) / atr
+                if zone_touch and ema50_touch and structure_protected and depth_atr >= 0.75:
+                    pullback_idx = idx
+                    pullback_type = "MACRO_PULLBACK"
+                    result.update({
+                        "macro_pullback": True, "macro_ema50": ema50_i,
+                        "macro_pullback_depth_atr": float(depth_atr),
+                        "protected_swing_level": float(protected_swing),
+                    })
+                    break
+
+    # If no deeper EMA50/causal-zone pullback qualifies, evaluate the fast
+    # EMA9/EMA15 band for a shallower micro-pullback.
     if pullback_idx is None:
-        result.update({"reason": "waiting_for_ema_band_pullback",
+        for idx in range(scan_start, len(closed) - 1):
+            e9_i, e15_i = float(ema9.iloc[idx]), float(ema15.iloc[idx])
+            band_low, band_high = min(e9_i, e15_i), max(e9_i, e15_i)
+            candle_low, candle_high = float(closed["low"].iloc[idx]), float(closed["high"].iloc[idx])
+            candle_close = float(closed["close"].iloc[idx])
+            if direction == "BUY":
+                touched = candle_low <= band_high + 0.25 * atr and candle_low >= band_low - 0.35 * atr
+                held = candle_close >= band_low - 0.35 * atr
+            else:
+                touched = candle_high >= band_low - 0.25 * atr and candle_high <= band_high + 0.35 * atr
+                held = candle_close <= band_high + 0.35 * atr
+            if touched and held:
+                pullback_idx = idx
+                pullback_type = "MICRO_PULLBACK"
+                break
+
+    if pullback_idx is None:
+        result.update({"reason": "waiting_for_ema_band_or_macro_pullback",
+                       "entry_mode": "WAITING_FOR_PULLBACK",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
@@ -928,7 +1047,23 @@ def validate_ema915_vwap_pullback_entry_gate(
         lower_wick_ratio = (min(candle_open, candle_close) - candle_low) / candle_range if candle_range > 0 else 0.0
         upper_wick_ratio = (candle_high - max(candle_open, candle_close)) / candle_range if candle_range > 0 else 0.0
         e9_at_rejection = float(ema9.iloc[idx])
-        if direction == "BUY":
+        if pullback_type == "MACRO_PULLBACK" and ema50 is not None:
+            e50_at_rejection = float(ema50.iloc[idx])
+            if direction == "BUY":
+                rejection = (
+                    candle_close > candle_open
+                    and candle_close > float(previous["close"])
+                    and candle_close > e50_at_rejection + 0.05 * atr
+                    and lower_wick_ratio >= 0.10
+                )
+            else:
+                rejection = (
+                    candle_close < candle_open
+                    and candle_close < float(previous["close"])
+                    and candle_close < e50_at_rejection - 0.05 * atr
+                    and upper_wick_ratio >= 0.10
+                )
+        elif direction == "BUY":
             rejection = (candle_close > candle_open and candle_close > float(previous["close"])
                          and candle_close > e9_at_rejection and lower_wick_ratio >= 0.10)
         else:
@@ -939,6 +1074,8 @@ def validate_ema915_vwap_pullback_entry_gate(
 
     if rejection_idx is None:
         result.update({"reason": "waiting_for_directional_rejection",
+                       "entry_mode": pullback_type, "pullback_type": pullback_type,
+                       "macro_pullback": pullback_type == "MACRO_PULLBACK",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts,
                        "pullback_timestamp": int(closed["timestamp"].iloc[pullback_idx])})
         return result
@@ -969,7 +1106,10 @@ def validate_ema915_vwap_pullback_entry_gate(
     })
     if not continuation:
         reason = "false_breakout_close_back_inside" if wick_broke else "waiting_for_continuation_break"
-        result.update({"reason": reason, "cross_direction": cross_direction,
+        result.update({"reason": reason, "entry_mode": pullback_type,
+                       "pullback_type": pullback_type,
+                       "macro_pullback": pullback_type == "MACRO_PULLBACK",
+                       "cross_direction": cross_direction,
                        "cross_timestamp": cross_ts, "rejection_confirmed": True,
                        "continuation_break": False})
         return result
@@ -1024,9 +1164,20 @@ def validate_ema915_vwap_pullback_entry_gate(
     signal_ts = int(last["timestamp"])
     pullback_ts = int(closed["timestamp"].iloc[pullback_idx])
     result.update({
-        "ready": True, "reason": "ema915_cross_vwap_pullback_rejection_then_quality_breakout_confirmed",
-        "authorization_state": "EMA915_VWAP_PULLBACK_VALID",
-        "cross_direction": cross_direction, "cross_timestamp": cross_ts,
+        "ready": True, "entry_mode": pullback_type, "pullback_type": pullback_type,
+        "macro_pullback": pullback_type == "MACRO_PULLBACK",
+        "reason": (
+            "ema915_vwap_macro_pullback_rejection_then_quality_breakout_confirmed"
+            if pullback_type == "MACRO_PULLBACK"
+            else "ema915_cross_vwap_pullback_rejection_then_quality_breakout_confirmed"
+        ),
+        "authorization_state": (
+            "EMA915_VWAP_MACRO_PULLBACK_VALID"
+            if pullback_type == "MACRO_PULLBACK"
+            else "EMA915_VWAP_PULLBACK_VALID"
+        ),
+        "cross_direction": cross_direction, "ema9_cross": cross_direction,
+        "cross_timestamp": cross_ts,
         "cross_age_bars": cross_age_bars, "pullback_timestamp": pullback_ts,
         "rejection_timestamp": rejection_ts,
         "signal_candle_timestamp": signal_ts,
