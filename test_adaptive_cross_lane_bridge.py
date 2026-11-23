@@ -113,16 +113,13 @@ def test_scanner_snapshot_uses_only_defined_adaptive_side_map_and_progress_map()
 
 def test_live_adaptive_gate_explicitly_allows_only_confirmed_impulse_mode():
     from pathlib import Path
+
     source = Path(__file__).with_name("ggpbot.py").read_text(encoding="utf-8")
-    execute_start = source.index("def execute_entry(")
-    execute_end = source.find("\\ndef ", execute_start + 1)
-    execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
-    execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
-    execute_end = source.find("\ndef ", execute_start + 1)
-    execute = source[execute_start:execute_end if execute_end >= 0 else len(source)]
+    execute = source.split("def execute_entry(", 1)[1].split("\ndef ", 1)[0]
     assert '"EMA915_VWAP_IMPULSE_VALID"' in execute
     assert '"IMPULSE_ENTRY"' in execute
     assert 'gate_result.get("gate_kind") == "EMA915_PULLBACK"' in execute
-    open_position = source[source.index("def open_position("):]
+
+    open_position = source.split("def open_position(", 1)[1]
     assert "_validate_ema915_vwap_pullback_entry_gate(" in open_position
     assert "entry_gate_snapshot" in open_position
