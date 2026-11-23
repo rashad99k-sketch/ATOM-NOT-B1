@@ -20,6 +20,7 @@ def _frame(side="BUY", count=80):
     frame.loc[count - 25:count - 2, "volume"] = 800.0
     frame.loc[count - 1, "volume"] = 1200.0
     if side == "BUY":
+        # Pullback, rejection and breakout occupy distinct closed candles.
         frame.loc[count - 3, ["open", "high", "low", "close"]] = [100.05, 100.22, 99.90, 100.05]
         frame.loc[count - 2, ["open", "high", "low", "close"]] = [100.00, 100.30, 99.85, 100.22]
         frame.loc[count - 1, ["open", "high", "low", "close"]] = [100.15, 100.60, 100.05, 100.50]
@@ -32,18 +33,13 @@ def _frame(side="BUY", count=80):
 
 def _ema_factory(side="BUY"):
     def ema(values, period):
-        n = len(values)
         if period == 9:
-            if side == "BUY":
-                out = np.full(n, 99.8, dtype=float)
-                out[-4:] = 100.2
-            else:
-                out = np.full(n, 100.2, dtype=float)
-                out[-4:] = 100.0
+            out = np.full(len(values), 99.8 if side == "BUY" else 100.2, dtype=float)
+            out[-4:] = 100.2 if side == "BUY" else 100.0
         elif period == 15:
-            out = np.full(n, 100.0 if side == "BUY" else 100.1, dtype=float)
+            out = np.full(len(values), 100.0 if side == "BUY" else 100.1, dtype=float)
         else:
-            out = np.asarray(values.ewm(span=period, adjust=False), dtype=float)
+            raise AssertionError(f"unexpected EMA period: {period}")
         return pd.Series(out, index=values.index)
     return ema
 
