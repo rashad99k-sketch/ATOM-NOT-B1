@@ -189,6 +189,34 @@ def test_shared_scanner_cache_reuses_raw_snapshot_and_returns_closed_bars_only(m
 
 
 
+def test_stale_duplicate_closed_frame_is_removed_from_radar():
+    from m15_watchlist_integration import process_m15_watchlist_frame
+
+    frame = frame_from_closes(
+        [100.0] * 60,
+        NOW - 60 * 900_000 - 45 * 60_000,
+    )
+    candle_ts = int(frame["timestamp"].iloc[-1])
+    prior = {
+        "symbol": "BTC/USDT", "lifecycle_active": False,
+        "crossover_status": "CROSS_CONFIRMED", "direction": "BUY",
+        "last_update_ms": NOW - 45 * 60_000,
+    }
+    memory = {
+        "watchlist": {"BTC/USDT": {"symbol": "BTC/USDT", "m15_setup": {"stage": "WAITING"}}},
+        "_m15_lifecycle_last_candle": {"BTC/USDT": candle_ts},
+        "_m15_lifecycle_rows": {"BTC/USDT": prior},
+        "m15_crossover_radar": [prior],
+    }
+
+    result = process_m15_watchlist_frame("BTC/USDT", frame, memory, now_ms=NOW)
+
+    assert result["crossover_status"] == "EXPIRED"
+    assert memory["m15_crossover_radar"] == []
+    assert memory["m15_crossover_radar_meta"]["state"] == "DATA_UNAVAILABLE"
+    assert memory["m15_crossover_radar_meta"]["last_data_error"] == "STALE_CLOSED_CANDLE_DATA"
+
+
 def test_legacy_radar_hook_does_not_launch_duplicate_exchange_scan(monkeypatch):
     import inspect
     import ggpbot
