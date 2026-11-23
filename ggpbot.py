@@ -6173,20 +6173,48 @@ def open_position(side, amount, symbol, stop_loss=None, trade_id=None, managemen
             log_execution(f"[EMA915_FINAL_GATE] BLOCKED {sym}: approved entry snapshot missing", "ERROR")
             return None
         latest_gate_frame = _integration_fetch_frame(sym)
-        final_gate = _validate_adaptive_ema9_vwap_entry_gate(
-            latest_gate_frame, side, ema,
-            timeframe_seconds=_roro_timeframe_seconds(str(
-                management_state.get("entry_gate_timeframe") or INTERVAL
-            )),
-            now_ms=int(time.time() * 1000), lookback_candles=5,
-            current_price=price,
-            entry_zone_low=management_state.get("entry_zone_low"),
-            entry_zone_high=management_state.get("entry_zone_high"),
-            max_chase_atr=1.5,
-        )
+        gate_kind = str(
+            management_state.get("entry_gate_kind")
+            or ("EMA915_PULLBACK" if str(gate_snapshot.get("trigger") or "").startswith("EMA9_EMA15") else "ADAPTIVE_EMA9_VWAP")
+        ).upper()
+        gate_timeframe_seconds = _roro_timeframe_seconds(str(
+            management_state.get("entry_gate_timeframe") or INTERVAL
+        ))
+        if gate_kind == "EMA915_PULLBACK":
+            final_gate = _validate_ema915_vwap_pullback_entry_gate(
+                latest_gate_frame, side, ema,
+                timeframe_seconds=gate_timeframe_seconds,
+                now_ms=int(time.time() * 1000),
+                cross_lookback_candles=8, pullback_lookback_candles=5,
+                current_price=price, max_extension_atr=1.5,
+                setup_mode=str(management_state.get("entry_gate_setup_mode") or gate_snapshot.get("setup_mode") or "CONTINUATION"),
+                institutional_evidence=list(management_state.get("entry_gate_evidence") or []),
+                institutional_event_id=management_state.get("entry_gate_event_id"),
+                institutional_origin_timestamp=management_state.get("entry_gate_origin_timestamp"),
+                entry_zone_low=management_state.get("entry_zone_low"),
+                entry_zone_high=management_state.get("entry_zone_high"),
+                entry_zone_available_timestamp=management_state.get("entry_zone_available_timestamp"),
+            )
+            final_gate["gate_kind"] = "EMA915_PULLBACK"
+        else:
+            final_gate = _validate_adaptive_ema9_vwap_entry_gate(
+                latest_gate_frame, side, ema,
+                timeframe_seconds=gate_timeframe_seconds,
+                now_ms=int(time.time() * 1000), lookback_candles=5,
+                current_price=price,
+                entry_zone_low=management_state.get("entry_zone_low"),
+                entry_zone_high=management_state.get("entry_zone_high"),
+                max_chase_atr=1.5,
+            )
+            final_gate["gate_kind"] = "ADAPTIVE_EMA9_VWAP"
         if (not final_gate.get("ready")
+                or final_gate.get("gate_kind") != gate_snapshot.get("gate_kind", gate_kind)
                 or final_gate.get("signal_candle_id") != gate_snapshot.get("signal_candle_id")
-                or final_gate.get("entry_mode") != gate_snapshot.get("entry_mode")):
+                or final_gate.get("entry_mode") != gate_snapshot.get("entry_mode")
+                or (
+                    gate_kind == "EMA915_PULLBACK"
+                    and final_gate.get("authorization_state") != gate_snapshot.get("authorization_state")
+                )):
             log_execution(
                 f"[EMA9_VWAP_FINAL_GATE] BLOCKED {sym} {side}: "
                 f"decision={final_gate.get('entry_mode')} reason={final_gate.get('reason')} "
@@ -8959,7 +8987,7 @@ def scaling_logic(symbol, df, ind):
             "native_sl_original_price": STATE.get("native_sl_original_price", STATE.get("sl")),
             "tp1_price": STATE.get("tp1_price"), "tp2_price": STATE.get("tp2_price"),
             "entry_gate_snapshot": dict(scale_gate), "entry_gate_kind": "EMA915_PULLBACK",
-            "entry_gate_timeframe": INTERVAL,
+            "entry_gate_timeframe": INTERVAL, "entry_gate_setup_mode": "CONTINUATION",
             "entry_zone_low": scale_gate.get("entry_zone_low"),
             "entry_zone_high": scale_gate.get("entry_zone_high"),
             "entry_zone_available_timestamp": scale_gate.get("entry_zone_available_timestamp"),
