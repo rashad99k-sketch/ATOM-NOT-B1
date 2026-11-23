@@ -843,7 +843,7 @@ def validate_ema915_vwap_pullback_entry_gate(
         "macro_trend_aligned": bool(macro_trend_aligned),
     })
     if not aligned and not macro_trend_aligned:
-        result.update({"reason": "ema915_vwap_or_macro_trend_not_aligned",
+        result.update({"reason": "ema915_or_vwap_direction_not_aligned",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
 
@@ -1064,7 +1064,7 @@ def validate_ema915_vwap_pullback_entry_gate(
                 break
 
     if pullback_idx is None:
-        result.update({"reason": "waiting_for_ema_band_or_macro_pullback",
+        result.update({"reason": "waiting_for_ema_band_pullback",
                        "entry_mode": "WAITING_FOR_PULLBACK",
                        "cross_direction": cross_direction, "cross_timestamp": cross_ts})
         return result
