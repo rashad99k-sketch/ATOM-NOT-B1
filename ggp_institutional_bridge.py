@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, List, Tuple
 import math
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -553,11 +554,87 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
     side = str(side or "").upper()
     if side not in {"BUY", "SELL"}:
         return {"symbol": canonical_symbol(symbol), "decision_state": "REJECTED", "rejection_reason": "invalid_side"}
-    context = _build_context(closed, side)
-    rev = REVERSAL.analyze(symbol, side, closed, context=context)
-    cont = CONTINUATION.analyze(symbol, side, closed, context=context)
-    decision = AUTHORITY.decide(rev, cont, risk_ok=True)
+    diagnostics_errors = []
+    try:
+        context = _build_context(closed, side)
+    except Exception as context_exc:
+        diagnostics_errors.append(f"context:{type(context_exc).__name__}")
+        try:
+            fallback_atr = float(_atr(closed))
+            fallback_price = float(closed.close.iloc[-1])
+        except Exception:
+            fallback_atr, fallback_price = 0.0, 0.0
+        if not (np.isfinite(fallback_atr) and fallback_atr > 0
+                and np.isfinite(fallback_price) and fallback_price > 0):
+            return {
+                "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol), "side": side,
+                "decision_state": DecisionState.REJECTED.value,
+                "decision_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reason": "institutional_context_failed_and_atr_unavailable",
+                "rejection_reasons": ["institutional_context_failed_and_atr_unavailable"],
+                "last_updated": time.time(), "data_quality": "INDICATOR_DATA_UNAVAILABLE",
+            }
+        context = {
+            "atr": fallback_atr, "price": fallback_price,
+            "regime": SimpleNamespace(state="UNKNOWN", direction="NEUTRAL"),
+            "structure": {"confirmed": False, "direction": "UNKNOWN", "bos": None, "mss": None,
+                          "swing_high": None, "swing_low": None},
+            "liquidity": SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
+                                         confidence=0.0, reasons=[]),
+            "order_block": None, "fvg": None,
+            "support_resistance": {"status": "UNKNOWN", "supports": [], "resistances": []},
+            "support_resistance_aligned": False,
+            "volume_ratio": 0.0, "volume_confirmed": False,
+            "golden_zone": {"state": "UNKNOWN", "score": 0.0},
+        }
+    context.setdefault("regime", SimpleNamespace(state="UNKNOWN", direction="NEUTRAL"))
+    context.setdefault("structure", {"confirmed": False, "direction": "UNKNOWN", "bos": None,
+                                     "mss": None, "swing_high": None, "swing_low": None})
+    context.setdefault("liquidity", SimpleNamespace(event="UNKNOWN", direction="UNKNOWN", level=None,
+                                                    confidence=0.0, reasons=[]))
+    context.setdefault("order_block", None)
+    context.setdefault("fvg", None)
+    context.setdefault("support_resistance", {"status": "UNKNOWN", "supports": [], "resistances": []})
+    context.setdefault("support_resistance_aligned", False)
+    context.setdefault("volume_ratio", 0.0)
+    context.setdefault("volume_confirmed", False)
+    context.setdefault("golden_zone", {"state": "UNKNOWN", "score": 0.0})
+    try:
+        if not (np.isfinite(float(context.get("atr") or 0)) and float(context.get("atr") or 0) > 0):
+            context["atr"] = float(_atr(closed))
+        if not (np.isfinite(float(context.get("price") or 0)) and float(context.get("price") or 0) > 0):
+            context["price"] = float(closed.close.iloc[-1])
+    except Exception as context_value_exc:
+        diagnostics_errors.append(f"context_values:{type(context_value_exc).__name__}")
+    try:
+        rev = REVERSAL.analyze(symbol, side, closed, context=context)
+    except Exception as rev_exc:
+        diagnostics_errors.append(f"reversal:{type(rev_exc).__name__}")
+        rev = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="reversal_diagnostics_unavailable", score=0.0,
+        )
+    try:
+        cont = CONTINUATION.analyze(symbol, side, closed, context=context)
+    except Exception as cont_exc:
+        diagnostics_errors.append(f"continuation:{type(cont_exc).__name__}")
+        cont = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="continuation_diagnostics_unavailable", score=0.0,
+        )
+    try:
+        decision = AUTHORITY.decide(rev, cont, risk_ok=True)
+    except Exception as authority_exc:
+        diagnostics_errors.append(f"authority:{type(authority_exc).__name__}")
+        decision = InstitutionalDecision(
+            state=DecisionState.WAITING_FOR_CONFIRMATION.value,
+            setup_type="DIAGNOSTICS_UNAVAILABLE", side=side,
+            reason="institutional_authority_diagnostics_unavailable", score=0.0,
+        )
     reg, liq, ob, fvg = context["regime"], context["liquidity"], context["order_block"], context["fvg"]
+    institutional_diagnostics_available = not diagnostics_errors
     ob_state = "UNKNOWN"
     if isinstance(ob, dict):
         validation = ob.get("validation") if isinstance(ob.get("validation"), dict) else {}
@@ -583,14 +660,22 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
                      and ob_state not in ("MITIGATED", "INVALIDATED"))
         except (TypeError, ValueError):
             ob_ok = False
-    fvg_ok = _fvg_matches_side(fvg, side)
+    try:
+        fvg_ok = _fvg_matches_side(fvg, side)
+    except Exception as fvg_exc:
+        diagnostics_errors.append(f"fvg:{type(fvg_exc).__name__}")
+        fvg_ok = False
+        institutional_diagnostics_available = False
     sr_context = context.get("support_resistance") if isinstance(context.get("support_resistance"), dict) else {}
     sr_key = "supports" if side == "BUY" else "resistances"
-    sr_aligned_zone = next((zone for zone in sr_context.get(sr_key, [])
-                            if isinstance(zone, dict)
-                            and str(zone.get("status") or "").upper() == "CONFIRMED"
-                            and float(zone.get("distance_atr", 999) or 999) <= 1.5
-                            and float(zone.get("strength", 0) or 0) >= 5.0), None)
+    try:
+        sr_aligned_zone = next((zone for zone in (sr_context.get(sr_key) or [])
+                                if isinstance(zone, dict)
+                                and str(zone.get("status") or "").upper() == "CONFIRMED"
+                                and float(zone.get("distance_atr", 999) or 999) <= 1.5
+                                and float(zone.get("strength", 0) or 0) >= 5.0), None)
+    except (TypeError, ValueError, OverflowError):
+        sr_aligned_zone = None
     sr_aligned = sr_aligned_zone is not None
     d, golden = _decision_result(decision), context["golden_zone"]
 
@@ -705,7 +790,12 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         _disp_atr = abs(float(_last.close) - float(_last.open)) / max(_atr(closed), 1e-12)
     except Exception:
         pass
-    _adx_value = _adx(closed)
+    try:
+        _adx_value = _adx(closed)
+    except Exception as adx_exc:
+        diagnostics_errors.append(f"adx:{type(adx_exc).__name__}")
+        _adx_value = float("nan")
+        institutional_diagnostics_available = False
     # Prefer the causal order block as the primary zone; use a directionally
     # valid, unfilled FVG only when no qualified OB exists.
     _zone_low = _zone_high = None
@@ -719,30 +809,44 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
             and np.isfinite(_zone_low) and np.isfinite(_zone_high)
             and 0 < _zone_low < _zone_high):
         _zone_low = _zone_high = None
-    _intelligence = build_intelligence_decision(
-        regime=reg.state, adx=_adx_value,
-        continuation_probability=(float(cont.score) / 100.0 if getattr(cont, "score", None) is not None else None),
-        liquidity_quality=("GOOD" if float(_liq_conf or 0) >= 65.0 else "ADEQUATE" if float(_liq_conf or 0) >= 50.0 else "UNKNOWN"),
-        displacement_atr=_disp_atr,
-        setup_type=decision.setup_type,
-        sweep_confirmed=_sniper_evidence_matches_side(
-            side, liq_name, liq_direction, context["structure"].get("mss"), bool(ob_ok or fvg_ok)
-        ),
-        mss_confirmed=(
-            str(context["structure"].get("mss") or "").upper()
-            == ("BULLISH_CHOCH" if side == "BUY" else "BEARISH_CHOCH")
-        ),
-        causal_zone_valid=bool(ob_ok or fvg_ok),
-        bos_level=(context["structure"].get("swing_high") if side == "BUY" else context["structure"].get("swing_low")),
-        reference_low=_zone_low, reference_high=_zone_high,
-        volatility_atr=(_atr(closed) / float(context["price"]) * 100.0 if float(context["price"] or 0) > 0 else None),
-        data_quality="VALID_CLOSED_CANDLES",
-    ).to_dict()
+    try:
+        _intelligence = build_intelligence_decision(
+            regime=reg.state, adx=_adx_value,
+            continuation_probability=(float(cont.score) / 100.0 if getattr(cont, "score", None) is not None else None),
+            liquidity_quality=("GOOD" if float(_liq_conf or 0) >= 65.0 else "ADEQUATE" if float(_liq_conf or 0) >= 50.0 else "UNKNOWN"),
+            displacement_atr=_disp_atr,
+            setup_type=decision.setup_type,
+            sweep_confirmed=_sniper_evidence_matches_side(
+                side, liq_name, liq_direction, context["structure"].get("mss"), bool(ob_ok or fvg_ok)
+            ),
+            mss_confirmed=(
+                str(context["structure"].get("mss") or "").upper()
+                == ("BULLISH_CHOCH" if side == "BUY" else "BEARISH_CHOCH")
+            ),
+            causal_zone_valid=bool(ob_ok or fvg_ok),
+            bos_level=(context["structure"].get("swing_high") if side == "BUY" else context["structure"].get("swing_low")),
+            reference_low=_zone_low, reference_high=_zone_high,
+            volatility_atr=(_atr(closed) / float(context["price"]) * 100.0 if float(context["price"] or 0) > 0 else None),
+            data_quality="VALID_CLOSED_CANDLES",
+        ).to_dict()
+    except Exception as intelligence_exc:
+        diagnostics_errors.append(f"intelligence:{type(intelligence_exc).__name__}")
+        institutional_diagnostics_available = False
+        _intelligence = {
+            "mode": "UNKNOWN", "entry_behavior": "EMA_VWAP_GATE_ONLY",
+            "confidence": 0.0, "reason_codes": ["INSTITUTIONAL_DIAGNOSTICS_UNAVAILABLE"],
+            "reference_low": None, "reference_high": None,
+        }
     # Chart-pattern recognition is observational metadata based exclusively on
     # the validated closed-candle frame; it cannot authorize or submit orders.
-    _intelligence["price_pattern"] = classify_price_pattern(
-        closed.to_dict("records"), atr=_atr(closed)
-    )
+    try:
+        _intelligence["price_pattern"] = classify_price_pattern(
+            closed.to_dict("records"), atr=_atr(closed)
+        )
+    except Exception as pattern_exc:
+        diagnostics_errors.append(f"pattern:{type(pattern_exc).__name__}")
+        _intelligence["price_pattern"] = "UNKNOWN"
+        institutional_diagnostics_available = False
     return {
         "symbol": canonical_symbol(symbol), "exchange_symbol": exchange_symbol(symbol),
         "side": side, "price": context["price"], "market_regime": reg.state,
@@ -757,6 +861,8 @@ def analyze_symbol(symbol: str, side: str, df: pd.DataFrame,
         "origin_timestamp": decision.origin_timestamp, "structural_stop": decision.structural_stop,
         "invalidation_level": decision.invalidation_level, "score": float(decision.score),
         "last_updated": time.time(), "last_update": time.time(), "data_quality": "VALID_CLOSED_CANDLES",
+        "institutional_diagnostics_available": bool(institutional_diagnostics_available),
+        "institutional_diagnostics_errors": list(diagnostics_errors),
         "liquidity": {"event": liq_name, "direction": liq_direction, "level": getattr(liq, "level", None),
                       "confidence": getattr(liq, "confidence", 0), "reasons": list(getattr(liq, "reasons", []))},
         "order_block": ob, "order_block_state": ob_state, "fvg": fvg, "golden_zone": golden,
