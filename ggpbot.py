@@ -9863,9 +9863,9 @@ function updateUI(d) {{
             let icon = item.cross ? "⚡" : (item.state === "NEAR_CROSS" || item.state === "CONVERGING" ? "🟡" : item.direction === "BUY" ? "📈" : item.direction === "SELL" ? "📉" : "⚪");
             let st = item.ema915_vwap_strategy || {{}};
             let stage = st.stage || "WAITING_FOR_SCAN";
-            let stageColor = stage === "ENTRY_READY" ? "#2ecc71" :
-                (stage === "ENTRY_WINDOW_MISSED" || stage === "CHOP_FILTER" || stage === "STALE_DATA" ? "#e74c3c" :
-                (stage === "NO_FRESH_CROSS" ? "#95a5a6" : "#f1c40f"));
+            let stageColor = ["ENTRY_READY", "MICRO_PULLBACK_READY", "MACRO_PULLBACK_READY"].includes(stage) ? "#2ecc71" :
+                (["ENTRY_WINDOW_MISSED", "INVALIDATED", "CHOP_FILTER", "STALE_DATA"].includes(stage) ? "#e74c3c" :
+                (["NO_FRESH_CROSS", "CROSS_EXPIRED", "CROSS_DIRECTION_MISMATCH"].includes(stage) ? "#95a5a6" : "#f1c40f"));
             let active = st.active_side || "NONE";
             let sideCheck = st[active.toLowerCase()] || {{}};
             let buyCheck = st.buy || {{}};
@@ -9874,8 +9874,8 @@ function updateUI(d) {{
               ${{icon}} <b>${{item.symbol}}</b> | <span style="color:${{stageColor}};font-weight:bold;">${{stage}}</span> | Side: ${{active}}
               <br><small>BUY: ${{buyCheck.stage || "NOT_EVALUATED"}} · Completion ${{buyCheck.setup_progress_pct ?? 0}}% · ${{buyCheck.reason || "-"}} | SELL: ${{sellCheck.stage || "NOT_EVALUATED"}} · Completion ${{sellCheck.setup_progress_pct ?? 0}}% · ${{sellCheck.reason || "-"}}</small>
               <br><small>Legacy EMA9/VWAP proximity (EMA50 advisory): ${{item.state || "UNKNOWN"}} · ${{item.cross_trigger || "No EMA9/VWAP cross"}} | EMA9: ${{item.ema9 ?? "-"}} | EMA50: ${{item.ema50 ?? "-"}} | VWAP: ${{item.vwap ?? "-"}}</small>
-              <br><small>EMA9/EMA15/VWAP: ${{st.trigger || "NOT_EVALUATED"}} | Cross: ${{sideCheck.cross_direction || "-"}} | Cross age: ${{sideCheck.cross_age_bars ?? "-"}} bars | EMA9: ${{sideCheck.ema9 ?? "-"}} | EMA15: ${{sideCheck.ema15 ?? "-"}} | VWAP: ${{sideCheck.vwap ?? "-"}}</small>
-              <br><small>Pullback: ${{sideCheck.pullback_touch ? "CONFIRMED" : "WAITING"}} | Rejection: ${{sideCheck.rejection_confirmed ? "CONFIRMED" : "WAITING"}} | Continuation break: ${{sideCheck.continuation_break ? "CONFIRMED" : "WAITING"}} | No-chase: ${{stage === "ENTRY_WINDOW_MISSED" ? "BLOCKED" : "OK"}}</small>
+              <br><small>EMA9 × EMA15 + Session VWAP: ${{st.trigger || "NOT_EVALUATED"}} | Cross: ${{sideCheck.cross_direction || "-"}} | Cross age: ${{sideCheck.cross_age_bars ?? "-"}} bars | EMA9: ${{sideCheck.ema9 ?? "-"}} | EMA15: ${{sideCheck.ema15 ?? "-"}} | VWAP: ${{sideCheck.vwap ?? "-"}}</small>
+              <br><small>Pullback: ${{sideCheck.pullback_type || (sideCheck.pullback_touch ? "MICRO_PULLBACK" : "WAITING")}} · ${{sideCheck.pullback_touch ? "TOUCHED" : "WAITING"}} | Macro depth: ${{sideCheck.macro_pullback_depth_atr ?? "-"}} ATR | Rejection: ${{sideCheck.rejection_confirmed ? "CONFIRMED" : "WAITING"}} | Continuation break: ${{sideCheck.continuation_break ? "CONFIRMED" : "WAITING"}} | No-chase: ${{stage === "ENTRY_WINDOW_MISSED" ? "BLOCKED" : "OK"}}</small>
               <br><small>Reason: ${{st.reason || "Waiting for closed-candle setup"}} · Closed candles · Watchlist only; final live entry revalidation required</small>
             </div>`;
         }});
