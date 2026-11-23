@@ -34,7 +34,18 @@ class RuntimeBootstrap:
                 })
                 return False
 
-            handle = self._lock_factory(os.path.abspath(lock_path))
+            try:
+                handle = self._lock_factory(os.path.abspath(lock_path))
+            except Exception as exc:
+                state.update({
+                    "status": "FAILED",
+                    "launch_mode": "wsgi",
+                    "started_at": time.time(),
+                    "heartbeat_ts": None,
+                    "thread_alive": False,
+                    "last_error": f"RUNTIME_LOCK_ACQUISITION_FAILED:{type(exc).__name__}:{str(exc)[:200]}",
+                })
+                return False
             if handle is None:
                 state.update({
                     "status": "LOCKED_BY_OTHER_PROCESS",
