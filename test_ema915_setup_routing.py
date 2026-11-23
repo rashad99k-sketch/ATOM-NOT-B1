@@ -170,48 +170,36 @@ def _impulse_frame(side, monkeypatch):
     frame.loc[:, "low"] = base - 0.05
     frame.loc[:, "close"] = base
     frame.loc[:, "volume"] = 100.0
-
-    # Most recent completed candle is the impulse; crossover happened one
-    # closed candle earlier in the injected EMA9/EMA15 series.
-    prior = frame.iloc[-11:-1]
-    level = float(prior["high"].max() if side == "BUY" else prior["low"].min())
-    open_price = level - 0.18 * direction
-    close_price = level + 0.18 * direction
-    impulse_range = 0.40
+    # The latest candle is the impulse, with a confirmed EMA9/EMA15 cross
+    # on the preceding candle. The price scale, EMA and VWAP stay coherent.
+    level = base + 0.05 if side == "BUY" else base - 0.05
+    open_price = level - 0.50 * direction
+    close_price = level + 0.50 * direction
     frame.loc[len(frame) - 2, ["open", "high", "low", "close", "volume"]] = [
         base, base + 0.06 * direction, base - 0.06 * direction,
         base + 0.03 * direction, 100.0
     ]
     frame.loc[len(frame) - 1, ["open", "high", "low", "close", "volume"]] = [
-        open_price,
-        max(open_price, close_price) + 0.02,
-        min(open_price, close_price) - 0.02,
-        close_price,
-        300.0,
+        open_price, max(open_price, close_price) + 0.02,
+        min(open_price, close_price) - 0.02, close_price, 300.0,
     ]
 
-    # Use an internally consistent EMA cross very close to the current price.
     def impulse_ema(values, period):
         n = len(values)
         if period == 9:
-            if side == "BUY":
-                out = np.full(n, close_price - 0.025, dtype=float)
-                out[-2:] = close_price - 0.015
-            else:
-                out = np.full(n, close_price + 0.025, dtype=float)
-                out[-2:] = close_price + 0.015
+            out = np.full(n, base - 0.03 if side == "BUY" else base + 0.03, dtype=float)
+            out[-2:] = base + 0.02 if side == "BUY" else base - 0.02
         elif period == 15:
-            out = np.full(n, close_price - 0.010 if side == "BUY" else close_price + 0.010, dtype=float)
+            out = np.full(n, base - 0.01 if side == "BUY" else base + 0.01, dtype=float)
         elif period in (20, 50):
-            out = np.full(n, close_price - 0.10 if side == "BUY" else close_price + 0.10, dtype=float)
+            out = np.full(n, base - 0.10 if side == "BUY" else base + 0.10, dtype=float)
         else:
             out = values.ewm(span=period, adjust=False).mean().to_numpy(dtype=float)
         return pd.Series(out, index=values.index)
 
-    vwap_value = close_price - 0.08 if side == "BUY" else close_price + 0.08
+    vwap_value = base - 0.02 if side == "BUY" else base + 0.02
     monkeypatch.setattr(
-        confluence,
-        "compute_session_vwap",
+        confluence, "compute_session_vwap",
         lambda closed, timeframe_seconds, now_ms=None: pd.Series(
             vwap_value, index=closed.index, dtype=float
         ),
@@ -271,7 +259,8 @@ def test_impulse_no_chase_never_authorizes_late_price(monkeypatch):
     result = validate_ema915_vwap_pullback_entry_gate(
         frame, "BUY", impulse_ema, timeframe_seconds=900, now_ms=now_ms,
         current_price=live + 3.0, setup_mode="TREND_CONTINUATION_ENGINE",
-        entry_zone_low=101.8, entry_zone_high=102.2,
+        entry_zone_low=float(frame.close.iloc[-1]) - 0.10,
+        entry_zone_high=float(frame.close.iloc[-1]) + 0.10,
         entry_zone_available_timestamp=int(frame.timestamp.iloc[-12]),
     )
     assert result["ready"] is False
